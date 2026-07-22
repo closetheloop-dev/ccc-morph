@@ -1,0 +1,15 @@
+version = 1
+sequence_timeout_ms = 1000
+
+# Also apply this config when the executable is launched as "codex-cli".
+aliases = ["codex-cli"]
+
+# Discard a single Ctrl-D after the double-press window expires.
+[[bindings]]
+keys = ["ctrl-d"]
+action = { type = "ignore" }
+
+# Send one Ctrl-D to Codex when Ctrl-D is pressed twice within the window.
+[[bindings]]
+keys = ["ctrl-d", "ctrl-d"]
+action = { type = "send", keys = ["ctrl-d"] }

@@ -1,0 +1,23 @@
+version = 1
+
+# Give the leader chords a generous window so vhs's inter-keystroke timing never
+# splits a Ctrl-B sequence, and let transient notices linger long enough for
+# Wait+Screen to catch them against the quiet target.
+sequence_timeout_ms = 2000
+completion_notice_timeout_ms = 20000
+notice_timeout_ms = 20000
+
+# Ctrl-B E opens the error viewer for failed background commands.
+[[bindings]]
+keys = ["ctrl-b", "e"]
+action = { type = "show-errors" }
+
+# Ctrl-B R runs a background command that succeeds (silent -> completion notice).
+[[bindings]]
+keys = ["ctrl-b", "r"]
+action = { type = "run", argv = ["sh", "-lc", "true"] }
+
+# Ctrl-B F runs a background command that fails (-> persistent failure notice).
+[[bindings]]
+keys = ["ctrl-b", "f"]
+action = { type = "run", argv = ["sh", "-lc", "echo boom >&2; exit 1"] }

@@ -1,0 +1,17 @@
+node_modules/
+dist/
+out/
+assets/
+coverage/
+*.log
+*.swp
+*.tsbuildinfo
+.env
+.DS_Store
+.idea/
+.vscode/
+
+# e2e render output (vhs gifs/logs) — regenerated each run.
+test/e2e/out/
+# e2e staging binary — a compiled ccc-morph copied in before the image build.
+test/e2e/ccc-morph

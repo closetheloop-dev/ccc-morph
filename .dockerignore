@@ -1,0 +1,25 @@
+# Only package.json/bun.lock/tsconfig/biome.jsonc/.gitignore, src/, test/,
+# examples/, and apps/ are COPY'd by the Dockerfile; keep the context minimal and
+# cache-friendly. The release notices and packaging script run on the CI
+# runner (post-export), not inside the image.
+node_modules/
+dist/
+out/
+assets/
+.git/
+.agents/
+.codex/
+.claude/
+release/
+scripts/
+install.sh
+README.md
+docs/
+*.log
+*.orig
+*.rej
+*.swp
+# e2e staging binary + render output must not bloat the top-level build context
+# (test/ is copied for the test gate). The e2e image builds from test/e2e/ itself.
+test/e2e/ccc-morph
+test/e2e/out/

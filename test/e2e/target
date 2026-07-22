@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Deterministic wrapped program for the ccc-morph e2e tapes.
+#
+# NO Codex, no network, no personal data: it cd's to a throwaway dir, uses no
+# prompt that reveals $PWD/$HOME/user, echoes every received byte as DATA:<hex>,
+# and reports terminal size as SIZE:<rows> <cols> on SIGWINCH. This mirrors the
+# `bun -e` child used by test/pty.test.ts, but in pure bash so the e2e image
+# needs no Bun. The DATA:/SIZE:/READY markers are the stable Wait+Screen anchors.
+export LC_ALL=C
+cd "$(mktemp -d)" 2>/dev/null || cd /tmp || exit 1
+
+report_size() {
+  # `stty size` prints "<rows> <cols>" for the controlling tty.
+  set -- $(stty size 2>/dev/null)
+  printf 'SIZE:%s %s\r\n' "${1:-?}" "${2:-?}"
+}
+trap 'report_size' WINCH
+
+# Raw mode so control bytes (e.g. Ctrl-D = 0x04) arrive as data, not tty signals.
+stty raw -echo 2>/dev/null
+
+printf 'READY\r\n'
+printf 'e2e $ \r\n'
+
+# Echo each received byte as DATA:<hex>. read -N1 returns one byte under LC_ALL=C;
+# "'$ch" makes printf yield that byte's numeric value. The short -t timeout lets a
+# pending SIGWINCH trap run promptly between reads (a blocking read would otherwise
+# defer it until the next byte, so the viewer-return resize would go unreported).
+while :; do
+  IFS= read -r -N1 -t 0.3 ch
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    printf 'DATA:%02x\r\n' "'$ch"
+  elif [ "$rc" -gt 128 ]; then
+    : # read timed out; loop so the WINCH trap can fire
+  else
+    break # EOF / stdin closed
+  fi
+done

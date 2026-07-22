@@ -1,0 +1,31 @@
+version = 1
+sequence_timeout_ms = 1000
+max_error_output_bytes = 262144
+
+# This is the GLOBAL config (config.toml). Its bindings apply to every wrapped
+# program. Per-program overrides live in separate app configs, apps/<name>.toml,
+# discovered by the wrapped executable's basename — for example, Codex's
+# single-/double-Ctrl-D handling ships in apps/codex.toml and applies only when
+# wrapping codex.
+#
+# The bindings below use Ctrl-B as a two-key leader (Ctrl-B, then another key).
+# Pick a leader the wrapped program does not need; note that a multiplexer may
+# claim it first (tmux owns Ctrl-B, screen owns Ctrl-A) — remap the multiplexer's
+# prefix or choose a different leader here if so.
+
+# Open details retained from failed background commands.
+[[bindings]]
+keys = ["ctrl-b", "e"]
+action = { type = "show-errors" }
+
+# An argv-based background-command example. Replace "your-command" locally.
+# Successful output is silent; a failed command is retained in the error
+# viewer (open it with Ctrl-B E above).
+[[bindings]]
+keys = ["ctrl-b", "r"]
+action = { type = "run", argv = ["sh", "-lc", "your-command"] }
+
+# Another remapping example: Ctrl-B L becomes Ctrl-L sent to the program.
+[[bindings]]
+keys = ["ctrl-b", "l"]
+action = { type = "send", keys = ["ctrl-l"] }

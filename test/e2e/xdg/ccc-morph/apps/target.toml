@@ -1,0 +1,13 @@
+version = 1
+
+# Per-app config discovered by the wrapped executable's basename ("target"),
+# layered on top of the globals. Exercises the same double-Ctrl-D handling the
+# Codex app config ships: a lone Ctrl-D is swallowed, a deliberate double press
+# sends exactly one Ctrl-D to the child.
+[[bindings]]
+keys = ["ctrl-d"]
+action = { type = "ignore" }
+
+[[bindings]]
+keys = ["ctrl-d", "ctrl-d"]
+action = { type = "send", keys = ["ctrl-d"] }
