@@ -13,7 +13,8 @@ works with any interactive program.
 
 ## Requirements
 
-- Linux or macOS.
+- Linux or macOS. Windows works via WSL2 (use the `linux-x64` binary); there is no
+  native Windows build.
 - An interactive terminal, needed only for shortcut interception. In a script or pipe,
   ccc-morph just runs the wrapped program as is.
 - Prebuilt binaries are self-contained. Building from source needs Bun 1.3.14+.
@@ -117,7 +118,8 @@ redirected (a pipe, a file, a non-interactive shell), there is no PTY to interce
 ccc-morph simply runs the wrapped command directly, inheriting stdin/stdout/stderr and
 forwarding its exit code, with no bindings applied.
 
-Limitations: Linux and macOS only, no Windows/ConPTY. After the error viewer closes,
+Limitations: Linux and macOS only — no native Windows/ConPTY build, though it runs under
+WSL2 (which is a real Linux environment; use the `linux-x64` binary). After the error viewer closes,
 programs that ignore terminal resize events may not repaint perfectly until their next
 redraw. See [Code layout](docs/development.md#code-layout) for the internals.
 
