@@ -13,7 +13,7 @@ works with any interactive program.
 
 ## Requirements
 
-- Linux or macOS. Windows works via WSL2 (use the `linux-x64` binary); there is no
+- Linux or macOS. Windows works via [WSL2](https://learn.microsoft.com/windows/wsl/) (use the `linux-x64` binary); there is no
   native Windows build.
 - An interactive terminal, needed only for shortcut interception. In a script or pipe,
   ccc-morph just runs the wrapped program as is.
@@ -119,7 +119,7 @@ ccc-morph simply runs the wrapped command directly, inheriting stdin/stdout/stde
 forwarding its exit code, with no bindings applied.
 
 Limitations: Linux and macOS only — no native Windows/ConPTY build, though it runs under
-WSL2 (which is a real Linux environment; use the `linux-x64` binary). After the error viewer closes,
+[WSL2](https://learn.microsoft.com/windows/wsl/) (which is a real Linux environment; use the `linux-x64` binary). After the error viewer closes,
 programs that ignore terminal resize events may not repaint perfectly until their next
 redraw. See [Code layout](docs/development.md#code-layout) for the internals.
 
@@ -142,6 +142,8 @@ pairing that named it. If you prefer, you can call it a **C**onfigurable **C**on
   and the code layout.
 - [Contributing](CONTRIBUTING.md): local development and pull-request guidance.
 - [Security policy](SECURITY.md): privately report vulnerabilities.
+
+For personal, opinionated notes on how I use it, see [my blog posts](https://closetheloop.dev/tags/ccc-morph).
 
 ## License
 
