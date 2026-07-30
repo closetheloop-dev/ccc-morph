@@ -25,6 +25,10 @@ if [ -n "${CCC_MORPH_BIN:-}" ]; then
 fi
 export PATH="$linkdir:$PATH"
 export XDG_CONFIG_HOME="$PWD/xdg"
+# Scripted editor for the add-note flow (notes.tape); VISUAL empty so EDITOR wins.
+chmod +x "$PWD/note-editor" 2>/dev/null || true
+export EDITOR="$PWD/note-editor"
+export VISUAL=""
 
 for tool in ccc-morph target vhs; do
   command -v "$tool" >/dev/null 2>&1 || { echo "error: '$tool' not found on PATH (set CCC_MORPH_BIN?)" >&2; exit 2; }

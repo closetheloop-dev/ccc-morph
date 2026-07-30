@@ -1,0 +1,9 @@
+version = 1
+
+# Claude Code is a full-screen TUI that repaints on resize, so it is safe to keep it
+# running (not SIGSTOP-paused) while the notes hub or editor is open: it redraws cleanly
+# on close, and output from a `!` shell-escape stays intact (it is rendered inside Claude's
+# own repainting UI). The global default stays "pause" to protect programs that stream
+# raw, append-only output (a bare shell, `tail -f`, a log follower) -- those would lose
+# whatever they print while a modal is open.
+notes_child_mode = "continue"

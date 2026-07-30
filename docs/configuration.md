@@ -18,6 +18,16 @@ identical on Linux and macOS.
 and cannot be combined with `--app` (a missing explicit file is an error).
 `--no-config` disables all configuration.
 
+`--check-config FILE` validates a global config file without launching anything: it
+exits `0` when the file parses (including the duplicate-encoding check) and non-zero
+with a message otherwise.
+
+`--ensure-defaults` creates the global config if it is absent and appends any missing
+default bindings (error viewer, notes hub) to it. It parses the config first, so it skips
+a default whose action is already bound or whose keys are already in use, appends the rest
+as text (leaving your comments and bindings intact), and never writes a config that would
+not parse. The installer runs it.
+
 ```toml
 version = 1
 sequence_timeout_ms = 1000
@@ -181,3 +191,24 @@ action = { type = "ignore" }
 
 In the viewer, use j/k or arrow keys to scroll, n/p to select another error, and q or
 Escape to return.
+
+Open the notes hub, or open the editor directly to add a note:
+
+```toml
+action = { type = "show-notes" }
+action = { type = "add-note" }
+```
+
+The default binding is `show-notes` on Ctrl-B N: it opens the picker, which is the hub for
+everything notes. `add-note` is still available if you want a direct "new note" leader key.
+A note is saved only if you write the file in the editor; quitting without saving (for
+example vim's `:q!`) discards it, and saving an empty buffer discards it too.
+
+Inside the picker, a three-row footer separates the keys. **Scroll** the current note with
+less/vim keys: `j`/`k` a line, `d`/`u` a half page, `f`/`b` a full page, `g`/`G` to the
+top/bottom (`Ctrl-D`/`Ctrl-U`, `Ctrl-F`/`Ctrl-B`, and `Page Up`/`Page Down` work too).
+**Create**: `a` adds a note and `e` edits
+the current note in your editor. **Manage**: the arrow keys move between notes, `Space`
+marks them and `Enter` inserts the marked notes into the wrapped program (archiving them),
+`Tab` switches between active and archived notes, `D` (Shift-D) deletes, `r` restores an
+archived note, and `q` or `Escape` returns. Timestamps are shown in local time.

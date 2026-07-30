@@ -22,6 +22,6 @@ WORKDIR /e2e
 COPY . /e2e/
 RUN install -m 0755 /e2e/ccc-morph /usr/local/bin/ccc-morph \
  && rm -f /e2e/ccc-morph \
- && chmod +x /e2e/target /e2e/run.sh
+ && chmod +x /e2e/target /e2e/run.sh /e2e/note-editor
 
 ENTRYPOINT ["/e2e/run.sh"]

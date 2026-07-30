@@ -1,3 +1,4 @@
 # e2e build context (this dir). Keep render output and logs out of the image.
 out/
 *.log
+xdg/ccc-morph/notes/

@@ -60,6 +60,7 @@ describe("configuration", () => {
     expect(config.noticeTimeoutMs).toBe(222);
     expect(config.completionNoticeTimeoutMs).toBe(444);
     expect(config.startNoticeTimeoutMs).toBe(333);
+    expect(config.notesChildMode).toBe("pause");
     expect(config.bindings).toHaveLength(3);
     expect(Array.from(compileBindings(config)[0]!.pattern)).toEqual([4, 4]);
   });
@@ -70,6 +71,7 @@ describe("configuration", () => {
     expect(emptyConfig().noticeTimeoutMs).toBe(10000);
     expect(emptyConfig().completionNoticeTimeoutMs).toBe(5000);
     expect(emptyConfig().startNoticeTimeoutMs).toBe(3000);
+    expect(emptyConfig().notesChildMode).toBe("pause");
   });
 
   test("keeps the shipped example configuration valid", () => {
@@ -79,6 +81,8 @@ describe("configuration", () => {
       ["ctrl-b", "e"],
       ["ctrl-b", "r"],
       ["ctrl-b", "l"],
+      ["ctrl-b", "n"],
+      ["ctrl-b", "p"],
     ]);
   });
 
@@ -86,8 +90,28 @@ describe("configuration", () => {
     const text = readFileSync(resolve(import.meta.dir, "../apps/codex.toml"), "utf8");
     const app = parseAppConfigText(text, "apps/codex.toml");
     expect(app.sequenceTimeoutMs).toBe(1000);
+    expect(app.notesChildMode).toBe("continue");
     expect(app.aliases).toEqual(["codex-cli"]);
     expect(app.bindings.map((binding) => binding.action.type)).toEqual(["ignore", "send"]);
+  });
+
+  test("inherits the global note shortcuts into the shipped Codex app config", () => {
+    const global = readFileSync(resolve(import.meta.dir, "../examples/config.toml"), "utf8");
+    const codex = readFileSync(resolve(import.meta.dir, "../apps/codex.toml"), "utf8");
+    withConfig(global, { codex }, (configPath) => {
+      const resolved = loadResolvedConfig(configPath, false, ["codex"], null);
+      expect(resolved.notesChildMode).toBe("continue");
+      expect(
+        resolved.bindings
+          .filter(
+            (binding) => binding.action.type === "add-note" || binding.action.type === "show-notes",
+          )
+          .map((binding) => binding.keys),
+      ).toEqual([
+        ["ctrl-b", "n"],
+        ["ctrl-b", "p"],
+      ]);
+    });
   });
 
   test("discovers an app config by basename and layers it over globals", () => {
@@ -104,6 +128,7 @@ action = { type = "quit" }
 sequence_timeout_ms = 500
 notice_timeout_ms = 333
 completion_notice_timeout_ms = 777
+notes_child_mode = "continue"
 [[unbind]]
 keys = ["ctrl-a"]
 [[bindings]]
@@ -121,6 +146,7 @@ action = { type = "send", keys = ["ctrl-d"] }
       expect(resolved.completionNoticeTimeoutMs).toBe(777);
       // The app omits start_notice_timeout_ms, so it inherits the global value.
       expect(resolved.startNoticeTimeoutMs).toBe(1000);
+      expect(resolved.notesChildMode).toBe("continue");
       expect(resolved.bindings.map((binding) => binding.keys)).toEqual([
         ["ctrl-b"],
         ["ctrl-d", "ctrl-d"],
@@ -259,6 +285,53 @@ keys = ["ctrl-d"]
 aliases = ["/usr/bin/demo"]
 `),
     ).toThrow("basename");
+
+    expect(() =>
+      parseAppConfigText(`version = 1
+notes_child_mode = "background"
+`),
+    ).toThrow('"pause" or "continue"');
+  });
+
+  test("rejects an invalid global notes_child_mode", () => {
+    expect(() =>
+      parseConfigText(`version = 1
+notes_child_mode = "background"
+`),
+    ).toThrow('"pause" or "continue"');
+  });
+
+  test("parses the add-note and show-notes actions", () => {
+    const config = parseConfigText(`version = 1
+[[bindings]]
+keys = ["ctrl-b", "n"]
+action = { type = "add-note" }
+[[bindings]]
+keys = ["ctrl-b", "p"]
+action = { type = "show-notes" }
+`);
+    expect(config.bindings.map((binding) => binding.action.type)).toEqual([
+      "add-note",
+      "show-notes",
+    ]);
+  });
+
+  test("an app inherits notes_child_mode from a non-default global", () => {
+    const global = `version = 1
+notes_child_mode = "continue"
+[[bindings]]
+keys = ["ctrl-a"]
+action = { type = "quit" }
+`;
+    const codex = `version = 1
+[[bindings]]
+keys = ["ctrl-d"]
+action = { type = "ignore" }
+`;
+    withConfig(global, { codex }, (configPath) => {
+      const resolved = loadResolvedConfig(configPath, false, ["codex"], null);
+      expect(resolved.notesChildMode).toBe("continue");
+    });
   });
 
   test("rejects duplicate encodings within one binding set", () => {

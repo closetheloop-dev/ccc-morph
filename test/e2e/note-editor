@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Deterministic non-interactive editor for the e2e notes tape: writes a fixed
+# two-line note to the file argument and exits, so the add-note flow is
+# reproducible without a real interactive editor. Referenced via EDITOR in run.sh.
+printf 'e2e note alpha\ne2e note bravo\n' > "$1"
+sleep 0.3

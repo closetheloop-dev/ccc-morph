@@ -13,8 +13,21 @@ export type RunAction = {
 export type ShowErrorsAction = { type: "show-errors" };
 export type QuitAction = { type: "quit" };
 export type IgnoreAction = { type: "ignore" };
+export type AddNoteAction = {
+  type: "add-note";
+};
+export type ShowNotesAction = { type: "show-notes" };
 
-export type Action = SendAction | RunAction | ShowErrorsAction | QuitAction | IgnoreAction;
+export type Action =
+  | SendAction
+  | RunAction
+  | ShowErrorsAction
+  | QuitAction
+  | IgnoreAction
+  | AddNoteAction
+  | ShowNotesAction;
+
+export type NotesChildMode = "pause" | "continue";
 
 export type Binding = {
   keys: string[];
@@ -29,6 +42,7 @@ export type SessionConfig = {
   noticeTimeoutMs: number;
   completionNoticeTimeoutMs: number;
   startNoticeTimeoutMs: number;
+  notesChildMode: NotesChildMode;
   bindings: Binding[];
 };
 
@@ -41,6 +55,7 @@ export type AppConfig = {
   noticeTimeoutMs?: number;
   completionNoticeTimeoutMs?: number;
   startNoticeTimeoutMs?: number;
+  notesChildMode?: NotesChildMode;
   inheritGlobals: boolean;
   unbind: string[][];
   bindings: Binding[];

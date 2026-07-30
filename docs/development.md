@@ -41,8 +41,8 @@ bash scripts/package-binaries.sh v0.0.0-local   # tar.gz per platform + SHA256SU
 ```
 
 `scripts/package-binaries.sh` packages the cross-compiled binaries into per-platform
-`tar.gz` archives that also bundle `install.sh`, the Codex app config, and the license
-notices. See the [Install](../README.md#install) section for the end-user flow.
+`tar.gz` archives that also bundle `install.sh`, the bundled app configs (Codex and Claude),
+and the license notices. See the [Install](../README.md#install) section for the end-user flow.
 
 The CI workflows persist BuildKit's layer cache with `actions/cache`, keyed on the
 dependency-defining files (`bun.lock`, `package.json`, `tsconfig.json`, `biome.jsonc`,

@@ -15,3 +15,8 @@ coverage/
 test/e2e/out/
 # e2e staging binary — a compiled ccc-morph copied in before the image build.
 test/e2e/ccc-morph
+
+# e2e notes store written during the notes tapes (regenerated). Match both the
+# directory (notes.tape) and the file form that notes-add-failure.tape creates to
+# force a store-write failure.
+test/e2e/xdg/ccc-morph/notes

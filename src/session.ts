@@ -1,8 +1,13 @@
+import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { BackgroundActions } from "./background-actions";
 import { compileBindings } from "./config";
 import { ErrorViewer } from "./error-viewer";
 import { encodeKeys, encodeRawHex } from "./keys";
 import { InputRouter, ShortcutMatcher } from "./matcher";
+import { NoteStore, type WorkspaceNote } from "./note-store";
+import { NoteViewer } from "./note-viewer";
 import type { ActionError, CompiledBinding, SendAction, SessionConfig } from "./types";
 
 const encoder = new TextEncoder();
@@ -99,6 +104,8 @@ export class TerminalSession {
   readonly #bindings: CompiledBinding[];
   readonly #background: BackgroundActions;
   readonly #viewer: ErrorViewer;
+  readonly #noteStore: NoteStore;
+  readonly #notes: NoteViewer;
   #child: Bun.Subprocess | null = null;
   #terminal: Bun.Terminal | null = null;
   #router: InputRouter | null = null;
@@ -110,16 +117,21 @@ export class TerminalSession {
   #noticeTimer: ReturnType<typeof setTimeout> | null = null;
   #reassertTimer: ReturnType<typeof setTimeout> | null = null;
   #failureNotice: { head: string; body: string; tail: string } | null = null;
+  #editorActive = false;
+  #notesModalPaused = false;
+  #modalTask: Promise<void> | null = null;
 
   readonly #onInput = (chunk: Buffer): void => {
-    if (this.#viewer.active) this.#viewer.handleInput(chunk);
+    if (this.#notes.active) this.#notes.handleInput(chunk);
+    else if (this.#viewer.active) this.#viewer.handleInput(chunk);
     else this.#router?.feed(chunk);
   };
 
   readonly #onResize = (): void => {
     const cols = process.stdout.columns ?? 80;
     const rows = process.stdout.rows ?? 24;
-    if (this.#viewer.active) this.#viewer.resize();
+    if (this.#notes.active) this.#notes.resize();
+    else if (this.#viewer.active) this.#viewer.resize();
     else {
       // A real resize supersedes a pending redraw restore; it forces the child
       // through a genuine size change on its own. The repaint also erases any
@@ -144,7 +156,14 @@ export class TerminalSession {
     this.#bindings = compileBindings(config);
     this.#viewer = new ErrorViewer({
       pauseChild: () => this.#signalChildGroup("SIGSTOP"),
-      resumeChild: () => this.#resumeChildWithRedraw(),
+      resumeChild: () => this.#redrawChild(true),
+    });
+    this.#noteStore = new NoteStore();
+    this.#notes = new NoteViewer(this.#noteStore, {
+      close: () => this.#finishNotesModal(),
+      submit: (notes) => this.#trackModalTask(this.#submitNotes(notes)),
+      edit: (note) => this.#trackModalTask(this.#editNote(note)),
+      add: () => this.#trackModalTask(this.#createNoteInPicker()),
     });
     this.#background = new BackgroundActions(
       config.maxErrorOutputBytes,
@@ -180,7 +199,7 @@ export class TerminalSession {
           rows,
           name: environment.TERM ?? "xterm-256color",
           data: (_terminal, data) => {
-            if (this.#viewer.active) return;
+            if (this.#modalActive()) return;
             process.stdout.write(data);
             // First output after the viewer closed: the child has reacted to
             // the shrunken PTY, so the real size can be restored shortly.
@@ -196,7 +215,9 @@ export class TerminalSession {
       this.#terminal = child.terminal ?? null;
       this.#startInput();
       this.#installSignals();
-      return await child.exited;
+      const exitCode = await child.exited;
+      if (this.#modalTask !== null) await this.#modalTask;
+      return exitCode;
     } finally {
       this.#cleanup();
     }
@@ -254,6 +275,14 @@ export class TerminalSession {
       }
       return;
     }
+    if (action.type === "add-note") {
+      this.#startNoteEditor();
+      return;
+    }
+    if (action.type === "show-notes") {
+      this.#openNotes();
+      return;
+    }
     if (action.type === "quit") {
       try {
         this.#child?.kill("SIGTERM");
@@ -271,15 +300,16 @@ export class TerminalSession {
     }
   }
 
-  #writeChild(bytes: Uint8Array): void {
+  #writeChild(bytes: Uint8Array): boolean {
     const terminal = this.#terminal;
-    if (!terminal || terminal.closed || bytes.length === 0) return;
+    if (!terminal || terminal.closed || bytes.length === 0) return false;
     if (this.#inputQueue.length > 0) {
       this.#inputQueue.push(bytes.slice());
-      return;
+      return true;
     }
     const written = terminal.write(bytes);
     if (written < bytes.length) this.#inputQueue.push(bytes.subarray(Math.max(0, written)).slice());
+    return true;
   }
 
   #flushInputQueue(): void {
@@ -298,7 +328,7 @@ export class TerminalSession {
 
   #reportFailure(error: ActionError): void {
     this.#viewer.add(error);
-    if (this.#viewer.active) return;
+    if (this.#modalActive()) return;
 
     const detailBinding = this.#bindings.find(
       (binding) => binding.action.type === "show-errors",
@@ -323,7 +353,9 @@ export class TerminalSession {
 
   // Writes an already-fitted status line over the terminal's bottom row.
   #writeNoticeRow(text: string): void {
-    if (this.#viewer.active) return;
+    // Never paint the notice row over a modal that owns the screen (error viewer,
+    // notes picker, or an external editor); it belongs over the child only.
+    if (this.#modalActive()) return;
     const rows = process.stdout.rows ?? 24;
     process.stdout.write(`\x1b7\x1b[${rows};1H\x1b[7m\x1b[2K${text}\x1b[0m\x1b8`);
   }
@@ -373,7 +405,9 @@ export class TerminalSession {
 
   #clearNotice(): void {
     const terminal = this.#terminal;
-    if (this.#viewer.active || !terminal || terminal.closed) return;
+    // Skip clearing (and its repaint nudge) while a modal owns the screen: the row
+    // is the modal's, and a stray SIGWINCH would disturb it.
+    if (this.#modalActive() || !terminal || terminal.closed) return;
     const rows = process.stdout.rows ?? 24;
     process.stdout.write(`\x1b7\x1b[${rows};1H\x1b[2K\x1b8`);
     this.#nudgeRepaint();
@@ -383,16 +417,16 @@ export class TerminalSession {
     if (this.#reassertTimer !== null) clearTimeout(this.#reassertTimer);
     this.#reassertTimer = setTimeout(() => {
       this.#reassertTimer = null;
-      if (this.#failureNotice === null || this.#viewer.active || !this.#viewer.unseen) return;
+      if (this.#failureNotice === null || this.#modalActive() || !this.#viewer.unseen) return;
       this.#paintFailureNotice();
     }, NOTICE_REASSERT_MS);
     this.#reassertTimer.unref();
   }
 
-  #resumeChildWithRedraw(): void {
+  #redrawChild(resume: boolean): void {
     const terminal = this.#terminal;
     if (!terminal || terminal.closed) {
-      this.#signalChildGroup("SIGCONT");
+      if (resume) this.#signalChildGroup("SIGCONT");
       return;
     }
     this.#nudgeRepaint(() => this.#signalChildGroup("SIGCONT"));
@@ -436,11 +470,224 @@ export class TerminalSession {
     if (pending === null) return;
     this.#pendingRestore = null;
     const terminal = this.#terminal;
-    // A reopened viewer or closed PTY cancels the restore; the next viewer
-    // close recomputes sizes from the current terminal.
-    if (this.#viewer.active || !terminal || terminal.closed) return;
+    // A reopened viewer, an open notes modal, or a closed PTY cancels the
+    // restore; the next modal close recomputes sizes from the current terminal.
+    if (this.#modalActive() || !terminal || terminal.closed) return;
     terminal.resize(pending.cols, pending.rows);
     this.#signalChildGroup("SIGWINCH");
+  }
+
+  #modalActive(): boolean {
+    return this.#viewer.active || this.#notes.active || this.#editorActive;
+  }
+
+  #beginNotesModal(): boolean {
+    if (this.#modalActive()) return false;
+    this.#notesModalPaused = this.#config.notesChildMode === "pause";
+    if (this.#notesModalPaused) this.#signalChildGroup("SIGSTOP");
+    return true;
+  }
+
+  #finishNotesModal(): void {
+    const paused = this.#notesModalPaused;
+    this.#notesModalPaused = false;
+    process.stdout.write("\x1b[0m\x1b[2J\x1b[H");
+    this.#redrawChild(paused);
+  }
+
+  #openNotes(): void {
+    if (!this.#beginNotesModal()) return;
+    try {
+      this.#notes.open();
+    } catch (error) {
+      this.#finishNotesModal();
+      this.#showStatus(
+        `notes unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  #startNoteEditor(): void {
+    if (this.#modalTask !== null || !this.#beginNotesModal()) return;
+    void this.#trackModalTask(this.#captureNote());
+  }
+
+  #trackModalTask(task: Promise<void>): Promise<void> {
+    this.#modalTask = task;
+    void task.finally(() => {
+      if (this.#modalTask === task) this.#modalTask = null;
+    });
+    return task;
+  }
+
+  // Run $VISUAL/$EDITOR on a temp file seeded with initialText and report the result.
+  // The file's mtime is backdated before launch so that "saved" reliably means the
+  // editor wrote the file: quitting without writing (e.g. vim :q!) reports saved:false
+  // regardless of filesystem timestamp granularity.
+  async #runEditor(initialText: string): Promise<{ saved: boolean; text: string; error?: string }> {
+    process.stdin.off("data", this.#onInput);
+    process.stdin.pause();
+    const savedState = this.#savedTerminalState;
+    if (savedState !== null) restoreStty(savedState);
+
+    let directory: string | null = null;
+    try {
+      directory = mkdtempSync(join(tmpdir(), "ccc-morph-note-"));
+      const path = join(directory, "note.md");
+      writeFileSync(path, initialText, { mode: 0o600 });
+      utimesSync(path, new Date(0), new Date(0));
+      const stamp = statSync(path).mtimeMs;
+      const editor = Bun.spawn(
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: this is shell parameter expansion, not JavaScript interpolation
+        ["/bin/sh", "-c", 'exec ${VISUAL:-${EDITOR:-vi}} "$1"', "ccc-morph-note-editor", path],
+        {
+          cwd: process.cwd(),
+          env: cleanEnvironment(),
+          stdin: "inherit",
+          stdout: "inherit",
+          stderr: "inherit",
+        },
+      );
+      const exitCode = await editor.exited;
+      if (exitCode !== 0)
+        return { saved: false, text: "", error: `editor exited with status ${exitCode}` };
+      if (statSync(path).mtimeMs === stamp) return { saved: false, text: "" };
+      const text = readFileSync(path, "utf8").replaceAll("\r\n", "\n").replace(/\n$/, "");
+      return { saved: true, text };
+    } catch (error) {
+      return {
+        saved: false,
+        text: "",
+        error: `note editor failed: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    } finally {
+      if (directory !== null) rmSync(directory, { recursive: true, force: true });
+      if (this.#savedTerminalState !== null) {
+        try {
+          runStty(["raw", "-echo"]);
+        } catch {
+          // Best effort; the modal transition below repaints regardless.
+        }
+      }
+      process.stdin.resume();
+      process.stdin.on("data", this.#onInput);
+    }
+  }
+
+  async #captureNote(): Promise<void> {
+    this.#editorActive = true;
+    let status = "";
+    try {
+      const result = await this.#runEditor("");
+      if (result.error) status = result.error;
+      else if (!result.saved) status = "note discarded";
+      else if (result.text.trim().length > 0) {
+        await this.#noteStore.add(result.text);
+        status = "note saved";
+      } else {
+        status = "empty note discarded";
+      }
+    } catch (error) {
+      // A NoteStore.add() failure (lock timeout, malformed notes file, permissions,
+      // full disk) must not become an unhandled rejection: #trackModalTask voids this
+      // task, so an escaping error would terminate the wrapper. Surface it as a status
+      // instead, matching #createNoteInPicker.
+      status = `note failed: ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      this.#editorActive = false;
+      this.#finishNotesModal();
+      if (status) this.#showStatus(status);
+    }
+  }
+
+  // Create a note from inside the open picker (the `a` key opens an empty editor),
+  // then return to the picker.
+  async #createNoteInPicker(): Promise<void> {
+    this.#editorActive = true;
+    let status = "";
+    try {
+      const result = await this.#runEditor("");
+      if (result.error) status = result.error;
+      else if (!result.saved) status = "note discarded";
+      else if (result.text.trim().length > 0) {
+        await this.#noteStore.add(result.text);
+        status = "note saved";
+      } else {
+        status = "empty note discarded";
+      }
+    } catch (error) {
+      status = `note failed: ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      this.#editorActive = false;
+      try {
+        this.#notes.refresh(status);
+      } catch (error) {
+        this.#finishNotesModal();
+        this.#showStatus(
+          `notes unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  }
+
+  // Re-edit an existing note in the editor, then return to the open picker.
+  async #editNote(note: WorkspaceNote): Promise<void> {
+    this.#editorActive = true;
+    let status = "";
+    try {
+      const result = await this.#runEditor(note.text);
+      if (result.error) status = result.error;
+      else if (!result.saved) status = "edit discarded";
+      else if (result.text.trim().length === 0) status = "empty edit ignored";
+      else if (result.text === note.text) status = "note unchanged";
+      else {
+        await this.#noteStore.update(note.id, result.text);
+        status = "note updated";
+      }
+    } catch (error) {
+      status = `note edit failed: ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      this.#editorActive = false;
+      try {
+        this.#notes.refresh(status);
+      } catch (error) {
+        this.#finishNotesModal();
+        this.#showStatus(
+          `notes unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  }
+
+  async #submitNotes(notes: WorkspaceNote[]): Promise<void> {
+    this.#finishNotesModal();
+    await Bun.sleep(60);
+    const text = notes
+      .map((note) => note.text)
+      .join("\n\n")
+      .replaceAll("\0", "")
+      .replaceAll("\x1b[201~", "\\x1b[201~");
+    const payload = encoder.encode(`\x1b[200~${text}\x1b[201~`);
+    if (!this.#writeChild(payload)) {
+      this.#showStatus("notes were not inserted because the child is no longer available");
+      return;
+    }
+    try {
+      await this.#noteStore.archive(notes.map((note) => note.id));
+    } catch (error) {
+      this.#showStatus(
+        `notes inserted but could not be archived: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  #showStatus(message: string): void {
+    if (this.#modalActive()) return;
+    const rows = process.stdout.rows ?? 24;
+    const columns = process.stdout.columns ?? 80;
+    process.stdout.write(
+      `\x1b7\x1b[${rows};1H\x1b[7m\x1b[2K${clip(`[ccc-morph] ${sanitizeStatus(message)}`, columns)}\x1b[0m\x1b8`,
+    );
   }
 
   #signalChildGroup(signal: NodeJS.Signals): void {
@@ -482,6 +729,8 @@ export class TerminalSession {
     for (const [signal, handler] of this.#signalHandlers) process.off(signal, handler);
     this.#signalHandlers.clear();
     process.stdin.pause();
+    if (this.#notes.active) this.#notes.deactivate();
+    this.#notesModalPaused = false;
     if (this.#viewer.active) this.#viewer.close();
     try {
       this.#terminal?.close();

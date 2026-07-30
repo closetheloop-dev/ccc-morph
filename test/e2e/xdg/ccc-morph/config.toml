@@ -6,6 +6,8 @@ version = 1
 sequence_timeout_ms = 2000
 completion_notice_timeout_ms = 20000
 notice_timeout_ms = 20000
+# Keep the quiet target running while the note editor/picker owns the terminal.
+notes_child_mode = "continue"
 
 # Ctrl-B E opens the error viewer for failed background commands.
 [[bindings]]
@@ -21,3 +23,15 @@ action = { type = "run", argv = ["sh", "-lc", "true"] }
 [[bindings]]
 keys = ["ctrl-b", "f"]
 action = { type = "run", argv = ["sh", "-lc", "echo boom >&2; exit 1"] }
+
+# Ctrl-B N opens the notes hub; inside it, a adds a note (via $EDITOR), e edits.
+[[bindings]]
+keys = ["ctrl-b", "n"]
+action = { type = "show-notes" }
+
+# Ctrl-B A is the direct add-note action (opens $EDITOR, writes straight to the
+# store, bypassing the hub). notes-add-failure.tape uses it to prove a failing
+# store write is reported, not crashed on.
+[[bindings]]
+keys = ["ctrl-b", "a"]
+action = { type = "add-note" }

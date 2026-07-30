@@ -31,29 +31,23 @@ mv -f "$tmp" "$bin_dir/ccc-morph"
 trap - EXIT
 echo "installed $bin_dir/ccc-morph"
 
-# 2. Install the Codex app config, never overwriting an existing one.
+# 2. Install the bundled app configs (codex, claude, ...), never overwriting an existing one.
 mkdir -p "$config_dir/apps"
-if [ -e "$config_dir/apps/codex.toml" ]; then
-  echo "kept existing $config_dir/apps/codex.toml"
-else
-  cp "$here/apps/codex.toml" "$config_dir/apps/codex.toml"
-  echo "installed $config_dir/apps/codex.toml"
-fi
+for app_config in "$here"/apps/*.toml; do
+  name="$(basename "$app_config")"
+  if [ -e "$config_dir/apps/$name" ]; then
+    echo "kept existing $config_dir/apps/$name"
+  else
+    cp "$app_config" "$config_dir/apps/$name"
+    echo "installed $config_dir/apps/$name"
+  fi
+done
 
-# 3. Create a starter global config if none exists (never overwrite).
-if [ -e "$config_dir/config.toml" ]; then
-  echo "kept existing $config_dir/config.toml"
-else
-  cat > "$config_dir/config.toml" <<'TOML'
-version = 1
-
-# Ctrl-B E opens the error viewer for failed background commands.
-[[bindings]]
-keys = ["ctrl-b", "e"]
-action = { type = "show-errors" }
-TOML
-  echo "created $config_dir/config.toml"
-fi
+# 3. Create or top up the global config with the default bindings. The binary parses
+#    the existing config, appends only missing, non-conflicting defaults (preserving
+#    your comments and bindings), validates the result, and never overwrites your
+#    settings. All the logic lives in `ccc-morph --ensure-defaults`.
+"$bin_dir/ccc-morph" --ensure-defaults
 
 # 4. PATH hint + sanity check. If bin_dir is not on PATH (common on macOS, where
 #    ~/.local/bin is not on the default PATH), print the exact line to add and the

@@ -28,10 +28,15 @@ for f in "${NOTICE_SRC[@]}"; do
   fi
 done
 
-if [[ ! -f apps/codex.toml ]]; then
-  echo "error: apps/codex.toml missing — required in every release archive" >&2
-  exit 1
-fi
+# Every release archive ships the bundled app configs (codex, claude, ...). install.sh
+# globs apps/*.toml, so anything copied in here reaches users; require the known ones so a
+# missing config fails the build rather than silently shipping a partial set.
+for app_config in apps/codex.toml apps/claude.toml; do
+  if [[ ! -f "$app_config" ]]; then
+    echo "error: $app_config missing — required in every release archive" >&2
+    exit 1
+  fi
+done
 
 if [[ ! -f install.sh ]]; then
   echo "error: install.sh missing — required in every release archive" >&2
@@ -47,11 +52,14 @@ for p in "${PLATFORMS[@]}"; do
   fi
   chmod 0755 "out/$p/ccc-morph"
   cp "${NOTICE_SRC[@]}" "out/$p/"
+  # Start from a clean apps dir: the whole dir is tarred below, so a stale config left
+  # by a prior local run (e.g. an app config since removed) must not leak into the archive.
+  rm -rf "out/$p/apps"
   mkdir -p "out/$p/apps"
-  cp apps/codex.toml "out/$p/apps/"
+  cp apps/*.toml "out/$p/apps/"
   cp install.sh "out/$p/"
   chmod 0755 "out/$p/install.sh"
-  tar -C "out/$p" -czf "assets/ccc-morph-$VERSION-$p.tar.gz" ccc-morph install.sh "${NOTICE_NAMES[@]}" apps/codex.toml
+  tar -C "out/$p" -czf "assets/ccc-morph-$VERSION-$p.tar.gz" ccc-morph install.sh "${NOTICE_NAMES[@]}" apps
 done
 (cd assets && sha256sum ccc-morph-*.tar.gz > SHA256SUMS.txt)
 

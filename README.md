@@ -1,8 +1,9 @@
 # ccc-morph
 
-`ccc-morph` transparently wraps an interactive terminal program and lets you remap key
-sequences to your own actions: send different input, run a background command, open an
-error viewer, or quit, all without the wrapped program knowing.
+`ccc-morph` is a transparent PTY wrapper for interactive terminal programs. It
+passes the wrapped program's display and input through normally, while configurable
+key sequences can send different input, keep persistent workspace notes, start
+background commands, open an error viewer, or terminate the session.
 
 The motivating example is the Codex CLI. Coming from Claude Code, your muscle memory
 fires `Ctrl-D Ctrl-D`. On raw Codex the first `Ctrl-D` quits Codex and the second then
@@ -43,10 +44,14 @@ Docker.
    ```
 
 `install.sh` copies the binary to `~/.local/bin` (override with `INSTALL_DIR=...`),
-installs the Codex app config to `~/.config/ccc-morph/apps/`, and writes a starter
-`~/.config/ccc-morph/config.toml` (a single `Ctrl-B E` binding that opens the error
-viewer). It never overwrites an existing config, and the archive's checksum covers
-`install.sh` too.
+installs the bundled app configs (Codex and Claude) to `~/.config/ccc-morph/apps/`, and runs
+`ccc-morph --ensure-defaults` to create or top up the global
+`~/.config/ccc-morph/config.toml` with two default bindings: `Ctrl-B E` (error viewer)
+and `Ctrl-B N` (the notes hub). Open the hub to view your notes; inside it, `a` adds a
+note and `e` edits. That command parses your config
+and appends only missing, non-conflicting defaults, so it never overwrites your settings,
+skips a default whose keys you already use, and never leaves an invalid config. The
+archive's checksum covers `install.sh` too.
 
 On macOS, `~/.local/bin` is not on the default `PATH`. If the installer reports
 that, add the line it prints to your shell profile (`~/.zshrc` for the default
@@ -54,6 +59,17 @@ zsh) and restart your shell.
 
 On macOS, if Gatekeeper blocks the binary, clear the download quarantine with
 `xattr -d com.apple.quarantine ~/.local/bin/ccc-morph`.
+
+### Upgrading
+
+To upgrade, download and (optionally) verify the new tarball, extract it, and re-run
+`./install.sh`. It swaps in the new binary, adds any newly bundled app configs, and re-runs
+`ccc-morph --ensure-defaults` to top up the global config with any new default bindings. Your
+own settings are never overwritten: an app config you already have under
+`~/.config/ccc-morph/apps/` is kept as-is (the installer reports `kept existing ...`), and
+`--ensure-defaults` only appends missing, non-conflicting bindings. Note that `--ensure-defaults`
+alone only touches the global `config.toml`; it does not install app configs, so re-running
+`install.sh` is the way to pick those up.
 
 ### Shell alias (optional)
 
@@ -87,6 +103,8 @@ ccc-morph -- bash                       # wrap any program
 ccc-morph --config ./my.toml -- codex   # use one explicit config file
 ccc-morph --no-config -- codex          # no config, fully transparent
 ccc-morph --app codex -- codex-wrapper  # force the codex app config
+ccc-morph --check-config ./my.toml      # validate a config file (exit 0 if valid)
+ccc-morph --ensure-defaults             # add any missing default bindings to your config
 ```
 
 The `--` separator is required. Everything after it is the wrapped command and its

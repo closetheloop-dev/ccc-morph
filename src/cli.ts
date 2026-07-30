@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
 
-import { defaultConfigPath, loadResolvedConfig } from "./config";
+import { readFileSync } from "node:fs";
+import { defaultConfigPath, loadResolvedConfig, parseConfigText } from "./config";
+import { ensureDefaults } from "./ensure-defaults";
 import { inspectKey } from "./key-inspector";
 import { TerminalSession } from "./session";
 
@@ -13,14 +15,18 @@ A transparent PTY wrapper with configurable keyboard shortcuts.
 Usage:
   ccc-morph [--config FILE | --no-config] [--app NAME] -- COMMAND [ARG...]
   ccc-morph --inspect-key
+  ccc-morph --check-config FILE
+  ccc-morph --ensure-defaults
 
 Options:
-  --config FILE  Use only this file as the configuration (no per-app discovery)
-  --no-config    Do not discover or load any configuration
-  --app NAME     Apply the named app's configuration file
-  --inspect-key  Print the exact bytes sent by one key combination
-  -h, --help     Show this help
-  -V, --version  Show the version
+  --config FILE      Use only this file as the configuration (no per-app discovery)
+  --no-config        Do not discover or load any configuration
+  --app NAME         Apply the named app's configuration file
+  --inspect-key      Print the exact bytes sent by one key combination
+  --check-config F   Validate a global config file; exit 0 if valid, non-zero if not
+  --ensure-defaults  Add any missing default bindings to your global config
+  -h, --help         Show this help
+  -V, --version      Show the version
 `;
 
 type ParsedArguments = {
@@ -30,9 +36,11 @@ type ParsedArguments = {
   command: string[];
 };
 
+type CheckConfigRequest = { checkConfigPath: string };
+
 export function parseArguments(
   args: string[],
-): ParsedArguments | "help" | "version" | "inspect-key" {
+): ParsedArguments | CheckConfigRequest | "help" | "version" | "inspect-key" | "ensure-defaults" {
   const separator = args.indexOf("--");
   const wrapperArgs = separator < 0 ? args : args.slice(0, separator);
   if (wrapperArgs.includes("--help") || wrapperArgs.includes("-h")) return "help";
@@ -42,6 +50,20 @@ export function parseArguments(
       throw new Error("--inspect-key cannot be combined with other arguments");
     }
     return "inspect-key";
+  }
+  if (wrapperArgs.includes("--check-config")) {
+    if (separator >= 0 || wrapperArgs.length !== 2 || wrapperArgs[0] !== "--check-config") {
+      throw new Error("--check-config takes only a file path and no other arguments");
+    }
+    const path = wrapperArgs[1];
+    if (!path) throw new Error("--check-config requires a file path");
+    return { checkConfigPath: path };
+  }
+  if (wrapperArgs.includes("--ensure-defaults")) {
+    if (separator >= 0 || wrapperArgs.length !== 1) {
+      throw new Error("--ensure-defaults cannot be combined with other arguments");
+    }
+    return "ensure-defaults";
   }
 
   if (separator < 0) throw new Error("missing -- before the wrapped command");
@@ -114,6 +136,52 @@ async function passthrough(command: string[]): Promise<number> {
   }
 }
 
+// Validate a global config file without launching anything: exit 0 when it
+// parses (including duplicate-encoding checks), non-zero with a message when not.
+function checkConfig(path: string): number {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (error) {
+    process.stderr.write(
+      `ccc-morph: cannot read ${path}: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    return 2;
+  }
+  try {
+    parseConfigText(text, path);
+  } catch (error) {
+    process.stderr.write(`ccc-morph: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 2;
+  }
+  return 0;
+}
+
+// Add any missing default bindings to the global config, preserving what is there.
+function ensureDefaultsCli(): number {
+  const result = ensureDefaults(defaultConfigPath());
+  if (result.error !== undefined) {
+    process.stderr.write(`ccc-morph: ${result.error}\n`);
+    return 2;
+  }
+  if (result.created) process.stdout.write(`created ${result.path}\n`);
+  for (const binding of result.added) {
+    process.stdout.write(`added ${binding.keys.join(" ")} (${binding.actionType})\n`);
+  }
+  for (const { binding, reason } of result.skipped) {
+    // "action-bound" is silent: the feature is already available on some key.
+    if (reason === "keys-in-use") {
+      process.stdout.write(
+        `skipped ${binding.keys.join(" ")} (${binding.actionType}): those keys are already in use\n`,
+      );
+    }
+  }
+  if (!result.created && result.added.length === 0) {
+    process.stdout.write(`${result.path} already has the default bindings\n`);
+  }
+  return 0;
+}
+
 export async function main(args = Bun.argv.slice(2)): Promise<number> {
   const parsed = parseArguments(args);
   if (parsed === "help") {
@@ -125,6 +193,8 @@ export async function main(args = Bun.argv.slice(2)): Promise<number> {
     return 0;
   }
   if (parsed === "inspect-key") return inspectKey();
+  if (parsed === "ensure-defaults") return ensureDefaultsCli();
+  if ("checkConfigPath" in parsed) return checkConfig(parsed.checkConfigPath);
 
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     return passthrough(parsed.command);

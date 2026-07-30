@@ -7,6 +7,7 @@ import type {
   AppConfig,
   Binding,
   CompiledBinding,
+  NotesChildMode,
   ResolvedConfig,
   SessionConfig,
 } from "./types";
@@ -16,6 +17,7 @@ const DEFAULT_MAX_ERROR_OUTPUT_BYTES = 256 * 1024;
 const DEFAULT_NOTICE_TIMEOUT_MS = 10_000;
 const DEFAULT_COMPLETION_NOTICE_TIMEOUT_MS = 5_000;
 const DEFAULT_START_NOTICE_TIMEOUT_MS = 3_000;
+const DEFAULT_NOTES_CHILD_MODE: NotesChildMode = "pause";
 
 function object(value: unknown, context: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -38,6 +40,14 @@ function optionalPositiveInteger(value: unknown, context: string): number | unde
     throw new Error(`${context} must be a positive integer`);
   }
   return value as number;
+}
+
+function optionalNotesChildMode(value: unknown, context: string): NotesChildMode | undefined {
+  if (value === undefined) return undefined;
+  if (value !== "pause" && value !== "continue") {
+    throw new Error(`${context} must be "pause" or "continue"`);
+  }
+  return value;
 }
 
 function stringArray(value: unknown, context: string): string[] {
@@ -65,10 +75,17 @@ function optionalStringArray(value: unknown, context: string): string[] {
 function parseAction(value: unknown, context: string): Action {
   const raw = object(value, context);
   const type = raw.type;
-  if (type === "show-errors" || type === "quit" || type === "ignore") return { type };
+  if (type === "show-errors" || type === "quit" || type === "ignore" || type === "show-notes") {
+    return { type };
+  }
+
+  if (type === "add-note") {
+    return { type };
+  }
 
   if (type === "run") {
-    return { type, argv: stringArray(raw.argv, `${context}.argv`) };
+    const argv = stringArray(raw.argv, `${context}.argv`);
+    return { type, argv };
   }
 
   if (type === "send") {
@@ -95,7 +112,9 @@ function parseAction(value: unknown, context: string): Action {
     return { type, bytes: raw.bytes };
   }
 
-  throw new Error(`${context}.type must be send, run, show-errors, quit, or ignore`);
+  throw new Error(
+    `${context}.type must be send, run, show-errors, quit, ignore, add-note, or show-notes`,
+  );
 }
 
 function parseBindings(value: unknown, context: string): Binding[] {
@@ -186,6 +205,9 @@ export function parseConfigText(text: string, source = "configuration"): Session
       DEFAULT_START_NOTICE_TIMEOUT_MS,
       `${source}.start_notice_timeout_ms`,
     ),
+    notesChildMode:
+      optionalNotesChildMode(raw.notes_child_mode, `${source}.notes_child_mode`) ??
+      DEFAULT_NOTES_CHILD_MODE,
     bindings: parseBindings(raw.bindings, `${source}.bindings`),
   };
 }
@@ -232,6 +254,7 @@ export function parseAppConfigText(text: string, source = "app config"): AppConf
       raw.start_notice_timeout_ms,
       `${source}.start_notice_timeout_ms`,
     ),
+    notesChildMode: optionalNotesChildMode(raw.notes_child_mode, `${source}.notes_child_mode`),
     inheritGlobals,
     unbind,
     bindings: parseBindings(raw.bindings, `${source}.bindings`),
@@ -247,6 +270,7 @@ export function emptyConfig(): SessionConfig {
     noticeTimeoutMs: DEFAULT_NOTICE_TIMEOUT_MS,
     completionNoticeTimeoutMs: DEFAULT_COMPLETION_NOTICE_TIMEOUT_MS,
     startNoticeTimeoutMs: DEFAULT_START_NOTICE_TIMEOUT_MS,
+    notesChildMode: DEFAULT_NOTES_CHILD_MODE,
     bindings: [],
   };
 }
@@ -259,6 +283,7 @@ function resolveGlobals(config: SessionConfig): ResolvedConfig {
     noticeTimeoutMs: config.noticeTimeoutMs,
     completionNoticeTimeoutMs: config.completionNoticeTimeoutMs,
     startNoticeTimeoutMs: config.startNoticeTimeoutMs,
+    notesChildMode: config.notesChildMode,
     bindings: [...config.bindings],
     appName: null,
   };
@@ -283,6 +308,7 @@ export function applyAppConfig(
     noticeTimeoutMs: app.noticeTimeoutMs ?? config.noticeTimeoutMs,
     completionNoticeTimeoutMs: app.completionNoticeTimeoutMs ?? config.completionNoticeTimeoutMs,
     startNoticeTimeoutMs: app.startNoticeTimeoutMs ?? config.startNoticeTimeoutMs,
+    notesChildMode: app.notesChildMode ?? config.notesChildMode,
     bindings: Array.from(merged.values()),
     appName,
   };

@@ -29,3 +29,13 @@ action = { type = "run", argv = ["sh", "-lc", "your-command"] }
 [[bindings]]
 keys = ["ctrl-b", "l"]
 action = { type = "send", keys = ["ctrl-l"] }
+
+# Open $VISUAL/$EDITOR to add a persistent workspace note.
+[[bindings]]
+keys = ["ctrl-b", "n"]
+action = { type = "add-note" }
+
+# Select active workspace notes to insert into the wrapped program for review.
+[[bindings]]
+keys = ["ctrl-b", "p"]
+action = { type = "show-notes" }

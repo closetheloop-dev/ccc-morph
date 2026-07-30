@@ -1,4 +1,5 @@
 import type { ActionError } from "./types";
+import { ViewerInput, type ViewerInputToken } from "./viewer-input";
 
 type ViewerControls = {
   pauseChild: () => void;
@@ -20,6 +21,7 @@ function visible(value: string): string {
 export class ErrorViewer {
   readonly #controls: ViewerControls;
   readonly #errors: ActionError[] = [];
+  readonly #input: ViewerInput;
   #active = false;
   #unseen = false;
   #index = 0;
@@ -27,6 +29,7 @@ export class ErrorViewer {
 
   constructor(controls: ViewerControls) {
     this.#controls = controls;
+    this.#input = new ViewerInput((token) => this.#handleToken(token));
   }
 
   get active(): boolean {
@@ -56,6 +59,7 @@ export class ErrorViewer {
     this.#active = true;
     this.#index = this.#errors.length - 1;
     this.#scroll = 0;
+    this.#input.reset();
     this.#controls.pauseChild();
     this.render();
     return true;
@@ -64,6 +68,7 @@ export class ErrorViewer {
   close(): void {
     if (!this.#active) return;
     this.#active = false;
+    this.#input.reset();
     process.stdout.write("\x1b[0m\x1b[2J\x1b[H");
     this.#controls.resumeChild();
   }
@@ -73,26 +78,29 @@ export class ErrorViewer {
   }
 
   handleInput(bytes: Uint8Array): void {
-    const input = new TextDecoder().decode(bytes);
-    if (input === "\x1b[A") {
-      this.#move(-1);
-      return;
-    }
-    if (input === "\x1b[B") {
-      this.#move(1);
-      return;
-    }
+    this.#input.feed(bytes);
+  }
 
-    for (const byte of bytes) {
-      if (byte === 0x71 || byte === 0x1b) {
-        this.close(); // q / Escape
-        return;
-      }
-      if (byte === 0x6a) this.#move(1); // j
-      if (byte === 0x6b) this.#move(-1); // k
-      if (byte === 0x6e) this.#select(1); // n
-      if (byte === 0x70) this.#select(-1); // p
+  #handleToken(token: ViewerInputToken): void {
+    if (!this.#active) return;
+    if (token === "up" || token === "down") {
+      this.#move(token === "up" ? -1 : 1);
+      return;
     }
+    if (token === "page-up" || token === "page-down") {
+      const page = Math.max((process.stdout.rows ?? 24) - 3, 1);
+      this.#move(token === "page-up" ? -page : page);
+      return;
+    }
+    if (token === 0x71 || token === 0x1b)
+      this.close(); // q / Escape
+    else if (token === 0x6a)
+      this.#move(1); // j
+    else if (token === 0x6b)
+      this.#move(-1); // k
+    else if (token === 0x6e)
+      this.#select(1); // n
+    else if (token === 0x70) this.#select(-1); // p
   }
 
   render(): void {
@@ -107,7 +115,7 @@ export class ErrorViewer {
     const body = lines.slice(this.#scroll, this.#scroll + bodyRows);
 
     const header = ` ccc-morph action error ${this.#index + 1}/${this.#errors.length} `;
-    const footer = ` j/k scroll  n/p error  q/Esc return  ${this.#scroll + 1}-${Math.min(this.#scroll + bodyRows, lines.length)}/${lines.length} `;
+    const footer = ` ↑/↓ or j/k scroll  n/p error  q/Esc return  ${this.#scroll + 1}-${Math.min(this.#scroll + bodyRows, lines.length)}/${lines.length} `;
     process.stdout.write(
       `\x1b[0m\x1b[2J\x1b[H\x1b[7m${header}\x1b[0m\r\n${body.join("\r\n")}\x1b[${rows};1H\x1b[7m${footer}\x1b[0m`,
     );
