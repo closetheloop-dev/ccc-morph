@@ -1,14 +1,18 @@
 import { mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { BackgroundActions } from "./background-actions";
+import { ChildWriter } from "./child-writer";
 import { compileBindings } from "./config";
 import { ErrorViewer } from "./error-viewer";
 import { encodeKeys, encodeRawHex } from "./keys";
 import { InputRouter, ShortcutMatcher } from "./matcher";
 import { NoteStore, type WorkspaceNote } from "./note-store";
 import { NoteViewer } from "./note-viewer";
-import type { ActionError, CompiledBinding, SendAction, SessionConfig } from "./types";
+import { adapterFor, OutputCapture } from "./output-capture";
+import { OutputViewer } from "./output-viewer";
+import { NO_RESUME } from "./resume";
+import type { ActionError, CompiledBinding, ResolvedConfig, SendAction } from "./types";
 
 const encoder = new TextEncoder();
 
@@ -25,6 +29,10 @@ const REDRAW_FALLBACK_MS = 300;
 // until the user opens the error viewer. The delay keeps the repaint out of
 // the middle of a frame (never splitting a child escape sequence).
 const NOTICE_REASSERT_MS = 80;
+
+// How many recent agent responses the browser lists (newest first). Bounds the list on
+// long transcripts while keeping plenty of history to scroll back through.
+const BROWSE_LIMIT = 30;
 
 function runStty(args: string[]): string {
   const result = Bun.spawnSync(["stty", ...args], {
@@ -99,18 +107,21 @@ function sendPayload(action: SendAction): Uint8Array {
 }
 
 export class TerminalSession {
-  readonly #config: SessionConfig;
+  readonly #config: ResolvedConfig;
   readonly #command: string[];
   readonly #bindings: CompiledBinding[];
   readonly #background: BackgroundActions;
   readonly #viewer: ErrorViewer;
   readonly #noteStore: NoteStore;
   readonly #notes: NoteViewer;
+  readonly #outputs: OutputViewer;
+  readonly #capture: OutputCapture;
   #child: Bun.Subprocess | null = null;
   #terminal: Bun.Terminal | null = null;
   #router: InputRouter | null = null;
   #savedTerminalState: string | null = null;
-  #inputQueue: Uint8Array[] = [];
+  // Buffers writes to the child and makes full delivery observable (see #submitNotes).
+  #writer: ChildWriter | null = null;
   #cleaned = false;
   #redrawTimer: ReturnType<typeof setTimeout> | null = null;
   #pendingRestore: { cols: number; rows: number; deadline: number } | null = null;
@@ -122,7 +133,8 @@ export class TerminalSession {
   #modalTask: Promise<void> | null = null;
 
   readonly #onInput = (chunk: Buffer): void => {
-    if (this.#notes.active) this.#notes.handleInput(chunk);
+    if (this.#outputs.active) this.#outputs.handleInput(chunk);
+    else if (this.#notes.active) this.#notes.handleInput(chunk);
     else if (this.#viewer.active) this.#viewer.handleInput(chunk);
     else this.#router?.feed(chunk);
   };
@@ -130,7 +142,8 @@ export class TerminalSession {
   readonly #onResize = (): void => {
     const cols = process.stdout.columns ?? 80;
     const rows = process.stdout.rows ?? 24;
-    if (this.#notes.active) this.#notes.resize();
+    if (this.#outputs.active) this.#outputs.resize();
+    else if (this.#notes.active) this.#notes.resize();
     else if (this.#viewer.active) this.#viewer.resize();
     else {
       // A real resize supersedes a pending redraw restore; it forces the child
@@ -150,7 +163,7 @@ export class TerminalSession {
     this.#restoreOuterTerminal();
   };
 
-  constructor(config: SessionConfig, command: string[]) {
+  constructor(config: ResolvedConfig, command: string[]) {
     this.#config = config;
     this.#command = command;
     this.#bindings = compileBindings(config);
@@ -159,11 +172,31 @@ export class TerminalSession {
       resumeChild: () => this.#redrawChild(true),
     });
     this.#noteStore = new NoteStore();
+    // Resolved app identity (from --app or alias discovery) so an aliased or wrapped program
+    // (e.g. `--app codex -- codex-wrapper`) still picks the right transcript adapter; falls
+    // back to the program basename when no app matched.
+    const appIdentity = this.#config.appName ?? basename(this.#command[0] ?? "");
+    const adapter = adapterFor(appIdentity);
+    const resumeIntent = adapter ? adapter.detectResume(this.#command.slice(1)) : NO_RESUME;
+    this.#capture = new OutputCapture({
+      commandName: appIdentity,
+      cwd: process.cwd(),
+      resumeLatest: resumeIntent.latest,
+      resumeSessionId: resumeIntent.sessionId,
+    });
     this.#notes = new NoteViewer(this.#noteStore, {
       close: () => this.#finishNotesModal(),
       submit: (notes) => this.#trackModalTask(this.#submitNotes(notes)),
       edit: (note) => this.#trackModalTask(this.#editNote(note)),
       add: () => this.#trackModalTask(this.#createNoteInPicker()),
+      capture: () => this.#trackModalTask(this.#createNoteInPicker(this.#capture.recent())),
+      history: () => this.#openHistory(),
+    });
+    this.#outputs = new OutputViewer({
+      // Selecting an item opens the editor pre-filled with it, then lands on the hub.
+      select: (text) => this.#trackModalTask(this.#createNoteInPicker(text)),
+      // Dismissing the history returns to the notes hub without capturing.
+      close: () => this.#notes.refresh(),
     });
     this.#background = new BackgroundActions(
       config.maxErrorOutputBytes,
@@ -199,6 +232,9 @@ export class TerminalSession {
           rows,
           name: environment.TERM ?? "xterm-256color",
           data: (_terminal, data) => {
+            // Capture every byte (even while a modal owns the screen) so `c` can
+            // pull the program's recent output on demand.
+            this.#capture.feed(data);
             if (this.#modalActive()) return;
             process.stdout.write(data);
             // First output after the viewer closed: the child has reacted to
@@ -208,14 +244,22 @@ export class TerminalSession {
             // re-assert it once the output pauses.
             if (this.#failureNotice !== null && this.#viewer.unseen) this.#scheduleReassert();
           },
-          drain: () => this.#flushInputQueue(),
+          drain: () => this.#writer?.flush(),
         },
       });
       this.#child = child;
       this.#terminal = child.terminal ?? null;
+      this.#writer = this.#terminal
+        ? new ChildWriter((bytes) =>
+            this.#terminal && !this.#terminal.closed ? this.#terminal.write(bytes) : 0,
+          )
+        : null;
       this.#startInput();
       this.#installSignals();
       const exitCode = await child.exited;
+      // The child is gone: fail any pending note-delivery waits before we await the modal
+      // task, so #submitNotes stops waiting to drain (and keeps its notes) instead of hanging.
+      this.#writer?.close();
       if (this.#modalTask !== null) await this.#modalTask;
       return exitCode;
     } finally {
@@ -276,7 +320,7 @@ export class TerminalSession {
       return;
     }
     if (action.type === "add-note") {
-      this.#startNoteEditor();
+      this.#startNoteEditor(action.source === "output" ? this.#capture.recent() : "");
       return;
     }
     if (action.type === "show-notes") {
@@ -302,33 +346,16 @@ export class TerminalSession {
 
   #writeChild(bytes: Uint8Array): boolean {
     const terminal = this.#terminal;
-    if (!terminal || terminal.closed || bytes.length === 0) return false;
-    if (this.#inputQueue.length > 0) {
-      this.#inputQueue.push(bytes.slice());
-      return true;
-    }
-    const written = terminal.write(bytes);
-    if (written < bytes.length) this.#inputQueue.push(bytes.subarray(Math.max(0, written)).slice());
-    return true;
-  }
-
-  #flushInputQueue(): void {
-    const terminal = this.#terminal;
-    if (!terminal || terminal.closed) return;
-    while (this.#inputQueue.length > 0) {
-      const bytes = this.#inputQueue[0]!;
-      const written = terminal.write(bytes);
-      if (written < bytes.length) {
-        this.#inputQueue[0] = bytes.subarray(Math.max(0, written)).slice();
-        return;
-      }
-      this.#inputQueue.shift();
-    }
+    if (!this.#writer || !terminal || terminal.closed || bytes.length === 0) return false;
+    return this.#writer.write(bytes);
   }
 
   #reportFailure(error: ActionError): void {
     this.#viewer.add(error);
-    if (this.#modalActive()) return;
+    // If the error viewer is already open, add() rendered the failure and marked it seen.
+    // Building a persistent notice here would leave stale state that suppresses later
+    // completion notices until the viewer is reopened, so stop after recording the error.
+    if (this.#viewer.active) return;
 
     const detailBinding = this.#bindings.find(
       (binding) => binding.action.type === "show-errors",
@@ -348,6 +375,9 @@ export class TerminalSession {
       clearTimeout(this.#noticeTimer);
       this.#noticeTimer = null;
     }
+    // A modal owns the screen: keep the notice but do not paint over it. It is surfaced when
+    // the modal closes and the child is redrawn (#finishNotesModal / #scheduleReassert).
+    if (this.#modalActive()) return;
     this.#paintFailureNotice();
   }
 
@@ -429,7 +459,10 @@ export class TerminalSession {
       if (resume) this.#signalChildGroup("SIGCONT");
       return;
     }
-    this.#nudgeRepaint(() => this.#signalChildGroup("SIGCONT"));
+    // Only resume a child the wrapper itself paused. A continue-mode notes modal never
+    // stopped the child, so closing it must repaint WITHOUT an unsolicited SIGCONT -- which
+    // would otherwise revive a child the user had independently stopped (e.g. Ctrl-Z).
+    this.#nudgeRepaint(resume ? () => this.#signalChildGroup("SIGCONT") : undefined);
   }
 
   // Forces a full child repaint: shrink the PTY one row, then restore the real
@@ -478,7 +511,25 @@ export class TerminalSession {
   }
 
   #modalActive(): boolean {
-    return this.#viewer.active || this.#notes.active || this.#editorActive;
+    return this.#viewer.active || this.#notes.active || this.#outputs.active || this.#editorActive;
+  }
+
+  // Open the response history from inside the notes hub: snapshot the wrapped program's
+  // recent agent responses (newest first) and hand the screen to the browser. The notes
+  // hub has already deactivated itself (its C-key handler), so no child resume happens.
+  // Plans are kept regardless of recency (Claude overwrites the plan file, so this is the
+  // only way to recover an earlier one); only plain responses are capped to the last N.
+  #openHistory(): void {
+    const agentItems = this.#capture
+      .latestMessages(0)
+      .filter((message) => message.role === "agent");
+    const keep = new Set(
+      agentItems.filter((message) => message.kind !== "plan").slice(-BROWSE_LIMIT),
+    );
+    const items = agentItems
+      .filter((message) => message.kind === "plan" || keep.has(message))
+      .reverse();
+    this.#outputs.open(items);
   }
 
   #beginNotesModal(): boolean {
@@ -493,6 +544,10 @@ export class TerminalSession {
     this.#notesModalPaused = false;
     process.stdout.write("\x1b[0m\x1b[2J\x1b[H");
     this.#redrawChild(paused);
+    // A background command may have failed while the modal owned the screen; its notice was
+    // kept but not painted (#reportFailure). Surface it now that the child is back. If the
+    // child then repaints over it, #scheduleReassert brings it back.
+    if (this.#failureNotice !== null && !this.#modalActive()) this.#paintFailureNotice();
   }
 
   #openNotes(): void {
@@ -507,9 +562,9 @@ export class TerminalSession {
     }
   }
 
-  #startNoteEditor(): void {
+  #startNoteEditor(prefill = ""): void {
     if (this.#modalTask !== null || !this.#beginNotesModal()) return;
-    void this.#trackModalTask(this.#captureNote());
+    void this.#trackModalTask(this.#captureNote(prefill));
   }
 
   #trackModalTask(task: Promise<void>): Promise<void> {
@@ -574,11 +629,11 @@ export class TerminalSession {
     }
   }
 
-  async #captureNote(): Promise<void> {
+  async #captureNote(prefill = ""): Promise<void> {
     this.#editorActive = true;
     let status = "";
     try {
-      const result = await this.#runEditor("");
+      const result = await this.#runEditor(prefill);
       if (result.error) status = result.error;
       else if (!result.saved) status = "note discarded";
       else if (result.text.trim().length > 0) {
@@ -602,11 +657,11 @@ export class TerminalSession {
 
   // Create a note from inside the open picker (the `a` key opens an empty editor),
   // then return to the picker.
-  async #createNoteInPicker(): Promise<void> {
+  async #createNoteInPicker(prefill = ""): Promise<void> {
     this.#editorActive = true;
     let status = "";
     try {
-      const result = await this.#runEditor("");
+      const result = await this.#runEditor(prefill);
       if (result.error) status = result.error;
       else if (!result.saved) status = "note discarded";
       else if (result.text.trim().length > 0) {
@@ -672,6 +727,12 @@ export class TerminalSession {
       this.#showStatus("notes were not inserted because the child is no longer available");
       return;
     }
+    // Archive only once the paste has actually reached the child. If the child exits with it
+    // still queued, keep the notes so a failed insertion does not silently discard them.
+    if (this.#writer && !(await this.#writer.drained())) {
+      this.#showStatus("notes were not inserted because the child exited before delivery");
+      return;
+    }
     try {
       await this.#noteStore.archive(notes.map((note) => note.id));
     } catch (error) {
@@ -708,6 +769,7 @@ export class TerminalSession {
     if (this.#cleaned) return;
     this.#cleaned = true;
     this.#background.shutdown();
+    this.#writer?.close();
     this.#router?.dispose();
     this.#router = null;
     if (this.#redrawTimer !== null) {
@@ -729,6 +791,7 @@ export class TerminalSession {
     for (const [signal, handler] of this.#signalHandlers) process.off(signal, handler);
     this.#signalHandlers.clear();
     process.stdin.pause();
+    if (this.#outputs.active) this.#outputs.deactivate();
     if (this.#notes.active) this.#notes.deactivate();
     this.#notesModalPaused = false;
     if (this.#viewer.active) this.#viewer.close();

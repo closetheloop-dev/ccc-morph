@@ -35,6 +35,7 @@ max_error_output_bytes = 262144
 notice_timeout_ms = 10000
 completion_notice_timeout_ms = 5000
 start_notice_timeout_ms = 3000
+notes_child_mode = "pause"
 
 [[bindings]]
 keys = ["ctrl-b", "e"]
@@ -70,6 +71,7 @@ max_error_output_bytes = 262144
 notice_timeout_ms = 10000
 completion_notice_timeout_ms = 5000
 start_notice_timeout_ms = 3000
+notes_child_mode = "pause"
 inherit_globals = true
 
 # Extra executable basenames that also select this app config.
@@ -204,11 +206,73 @@ everything notes. `add-note` is still available if you want a direct "new note" 
 A note is saved only if you write the file in the editor; quitting without saving (for
 example vim's `:q!`) discards it, and saving an empty buffer discards it too.
 
+While the notes hub, response history, or editor is open, `notes_child_mode` controls the wrapped
+program. `"pause"` freezes it (with `SIGSTOP`) so it cannot repaint over the modal; `"continue"`
+leaves it running. `"pause"` is the **global** default, which protects programs that stream raw,
+append-only output (a bare shell, `tail -f`) from losing what they print while a modal is open. The
+bundled `apps/claude.toml` and `apps/codex.toml`, however, set `notes_child_mode = "continue"`,
+because both are full-screen TUIs that redraw cleanly on close. So a normally installed Claude Code or
+Codex session runs with `"continue"`; the `"pause"` default applies to other programs and to any app
+without that override. Set it in the global config or per app.
+
+Set `source = "output"` on `add-note` to open the editor pre-filled with the wrapped program's
+recent output. For a known program that is the agent's latest message (Claude Code and Codex,
+read from its session transcript); for anything else it is the ANSI-stripped terminal buffer.
+You land in the editor with that text ready to trim, and whatever you keep becomes the note:
+
+```toml
+action = { type = "add-note", source = "output" }
+```
+
 Inside the picker, a three-row footer separates the keys. **Scroll** the current note with
 less/vim keys: `j`/`k` a line, `d`/`u` a half page, `f`/`b` a full page, `g`/`G` to the
 top/bottom (`Ctrl-D`/`Ctrl-U`, `Ctrl-F`/`Ctrl-B`, and `Page Up`/`Page Down` work too).
-**Create**: `a` adds a note and `e` edits
-the current note in your editor. **Manage**: the arrow keys move between notes, `Space`
+**Create**: `a` adds a note, `c` captures the program's recent output into a note (see
+`source = "output"` above), `C` opens the response history — a list+preview of the wrapped
+program's recent responses (and, for Claude Code / Codex in plan mode, its plans, labelled
+`plan:`) — where `↑`/`↓` select, the scroll keys page a long entry, and `Enter` captures the
+selected one into a note; and `e` edits the current note in your editor. **Manage**: the arrow keys move between notes, `Space`
 marks them and `Enter` inserts the marked notes into the wrapped program (archiving them),
 `Tab` switches between active and archived notes, `D` (Shift-D) deletes, `r` restores an
 archived note, and `q` or `Escape` returns. Timestamps are shown in local time.
+
+Response capture (`c` and `C`) reads the wrapped program's own session transcript, so it must know
+which session that is. It works for a fresh session and when you resume by session id (`claude
+--resume <id>`, `codex resume <id>`) or resume the most recent session (`claude --continue`, `codex
+resume --last`). When you resume through the **interactive picker** (bare `claude --resume`, or
+`codex resume` with no id), ccc-morph cannot tell which past session you selected, so it will not
+guess, rather than risk surfacing a different conversation: `c` captures from the current terminal
+buffer instead of the transcript, and `C` opens with no history entries. Use an explicit id or
+`--continue` / `--last` when you want history for a resumed session.
+
+For a deterministic Codex resume (`codex resume <id>` or `codex resume --last`), ccc-morph resolves
+the transcript from Codex's local thread index when that internal database is present and
+compatible, and otherwise falls back to scanning the rollout metadata. That index is an internal
+Codex detail, not a stable interface, so any absence or incompatibility silently uses the scan.
+
+Capture assumes **one wrapped agent session per working directory**. It identifies the session's
+transcript as the one that appears after ccc-morph launches; it cannot always tell that apart from a
+transcript created by a *different* Claude Code or Codex process started in the same directory at
+about the same time. So if you run two agents concurrently in one directory, `c`/`C` may show the
+other one's response. Run one agent per directory when you rely on capture.
+
+## Notes storage
+
+Notes are saved under the config directory, in `$XDG_CONFIG_HOME/ccc-morph/notes/` (falling back to
+`~/.config/ccc-morph/notes/`), the same base directory as `config.toml`.
+
+Notes are **per workspace**: one file holds the notes for one working directory, named after that
+directory (a readable slug of the path plus a short hash), for example
+`home-me-project-1a2b3c4d.jsonl`. The workspace is the wrapped program's current directory, so Claude
+Code and Codex started in the same folder share its notes, while a different folder gets its own file.
+
+Each file is JSONL. The first line is a workspace header
+(`{"type":"workspace","version":1,"path":"<directory>"}`), validated on load so a file is never read
+for the wrong workspace; every later line is one note
+(`{"type":"note","id":...,"text":...,"createdAt":...,"archivedAt":...}`, timestamps in ISO 8601).
+
+Archiving a note (mark it with `Space`, then `Enter` to insert it into the wrapped program) is a soft
+delete: the line stays in the file with `archivedAt` set and can be brought back with `r` from the
+archived view (`Tab` switches views). `D` (Shift-D) removes a note for good. Files are written
+atomically with owner-only permissions (`0600`, directory `0700`), and a lock serializes concurrent
+writers so two wrapped programs in the same directory do not clobber each other's notes.

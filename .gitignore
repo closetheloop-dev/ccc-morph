@@ -7,6 +7,8 @@ coverage/
 *.swp
 *.tsbuildinfo
 .env
+.keys
+*.keys
 .DS_Store
 .idea/
 .vscode/

@@ -80,7 +80,11 @@ function parseAction(value: unknown, context: string): Action {
   }
 
   if (type === "add-note") {
-    return { type };
+    if (raw.source === undefined) return { type };
+    if (raw.source !== "editor" && raw.source !== "output") {
+      throw new Error(`${context}.source must be "editor" or "output"`);
+    }
+    return { type, source: raw.source };
   }
 
   if (type === "run") {

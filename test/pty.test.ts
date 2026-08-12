@@ -1492,3 +1492,255 @@ action = { type = "show-notes" }
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("a background failure behind the notes hub is held, then surfaced when the hub closes", async () => {
+  const bun = Bun.which("bun");
+  if (!bun) throw new Error("Bun executable not found");
+
+  const directory = mkdtempSync(join(tmpdir(), "ccc-morph-failure-modal-test-"));
+  const workspace = join(directory, "workspace");
+  const config = join(directory, "config.toml");
+  mkdirSync(workspace);
+  writeFileSync(
+    config,
+    `version = 1
+sequence_timeout_ms = 30
+[[bindings]]
+keys = ["ctrl-r"]
+action = { type = "run", argv = ["sh", "-lc", "sleep 0.3; exit 3"] }
+[[bindings]]
+keys = ["ctrl-p"]
+action = { type = "show-notes" }
+`,
+  );
+
+  const chunks: Uint8Array[] = [];
+  const child = Bun.spawn(
+    [
+      bun,
+      "run",
+      resolve(import.meta.dir, "../src/cli.ts"),
+      "--config",
+      config,
+      "--",
+      bun,
+      "-e",
+      "console.log('READY'); setInterval(() => {}, 1000);",
+    ],
+    {
+      cwd: workspace,
+      env: { ...process.env },
+      terminal: {
+        cols: 80,
+        rows: 24,
+        data(_terminal, bytes) {
+          chunks.push(bytes.slice());
+        },
+      },
+    },
+  );
+
+  const output = (): string => new TextDecoder().decode(Buffer.concat(chunks));
+  const waitFor = async (needle: string): Promise<void> => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (output().includes(needle)) return;
+      await Bun.sleep(10);
+    }
+    throw new Error(
+      `timed out waiting for ${JSON.stringify(needle)}; output was ${JSON.stringify(output())}`,
+    );
+  };
+
+  try {
+    await waitFor("READY");
+    child.terminal!.write(Uint8Array.of(0x12)); // Ctrl-R: start the command that fails at ~0.3s
+    child.terminal!.write(Uint8Array.of(0x10)); // Ctrl-P: open the notes hub over it
+    await waitFor("ccc-morph notes [active]");
+    // The command fails while the hub owns the screen; its failure notice must be held back,
+    // not painted over the picker.
+    await Bun.sleep(450);
+    expect(output()).not.toContain("failed:");
+    // Close the hub; the held failure notice is now surfaced over the child.
+    child.terminal!.write(Uint8Array.of(0x71)); // q
+    await waitFor("ctrl-r failed:");
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already exited.
+    }
+    child.terminal?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("closing a continue-mode notes hub does not resume an independently stopped child", async () => {
+  const bun = Bun.which("bun");
+  if (!bun) throw new Error("Bun executable not found");
+
+  const directory = mkdtempSync(join(tmpdir(), "ccc-morph-continue-sigcont-test-"));
+  const workspace = join(directory, "workspace");
+  const config = join(directory, "config.toml");
+  mkdirSync(workspace);
+  writeFileSync(
+    config,
+    `version = 1
+sequence_timeout_ms = 30
+notes_child_mode = "continue"
+[[bindings]]
+keys = ["ctrl-p"]
+action = { type = "show-notes" }
+`,
+  );
+
+  const chunks: Uint8Array[] = [];
+  const child = Bun.spawn(
+    [
+      bun,
+      "run",
+      resolve(import.meta.dir, "../src/cli.ts"),
+      "--config",
+      config,
+      "--",
+      bun,
+      "-e",
+      // Emit a few ticks, then stop ourselves. A stray SIGCONT would resume the ticks.
+      "console.log('READY'); let n = 0; setInterval(() => { console.log('TICK'); if (++n === 3) process.kill(process.pid, 'SIGSTOP'); }, 40);",
+    ],
+    {
+      cwd: workspace,
+      env: { ...process.env },
+      terminal: {
+        cols: 80,
+        rows: 24,
+        data(_terminal, bytes) {
+          chunks.push(bytes.slice());
+        },
+      },
+    },
+  );
+
+  const output = (): string => new TextDecoder().decode(Buffer.concat(chunks));
+  const ticks = (): number => output().split("TICK").length - 1;
+  const waitFor = async (predicate: () => boolean): Promise<void> => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (predicate()) return;
+      await Bun.sleep(10);
+    }
+    throw new Error(`timed out; output was ${JSON.stringify(output())}`);
+  };
+
+  try {
+    await waitFor(() => output().includes("READY"));
+    // The child ticks three times, then SIGSTOPs itself; the tick count settles.
+    await waitFor(() => ticks() >= 3);
+    await Bun.sleep(120);
+    const stopped = ticks();
+    // Open and close the notes hub. In continue mode the wrapper never paused the child, so
+    // closing must NOT send an unsolicited SIGCONT that would revive the stopped child.
+    child.terminal!.write(Uint8Array.of(0x10)); // Ctrl-P: open the hub
+    await waitFor(() => output().includes("ccc-morph notes [active]"));
+    child.terminal!.write(Uint8Array.of(0x71)); // q: close the hub
+    await Bun.sleep(300);
+    expect(ticks()).toBe(stopped); // still stopped: no ticks resumed
+  } finally {
+    try {
+      child.kill("SIGCONT");
+      child.kill("SIGKILL");
+    } catch {
+      // Already exited.
+    }
+    child.terminal?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a failure seen inside the error viewer does not suppress a later completion notice", async () => {
+  const bun = Bun.which("bun");
+  if (!bun) throw new Error("Bun executable not found");
+
+  const directory = mkdtempSync(join(tmpdir(), "ccc-morph-viewer-failure-test-"));
+  const workspace = join(directory, "workspace");
+  const config = join(directory, "config.toml");
+  mkdirSync(workspace);
+  writeFileSync(
+    config,
+    `version = 1
+sequence_timeout_ms = 30
+[[bindings]]
+keys = ["ctrl-f"]
+action = { type = "run", argv = ["sh", "-lc", "exit 1"] }
+[[bindings]]
+keys = ["ctrl-h"]
+action = { type = "run", argv = ["sh", "-lc", "sleep 0.4; exit 1"] }
+[[bindings]]
+keys = ["ctrl-e"]
+action = { type = "show-errors" }
+[[bindings]]
+keys = ["ctrl-g"]
+action = { type = "run", argv = ["true"] }
+`,
+  );
+
+  const chunks: Uint8Array[] = [];
+  const child = Bun.spawn(
+    [
+      bun,
+      "run",
+      resolve(import.meta.dir, "../src/cli.ts"),
+      "--config",
+      config,
+      "--",
+      bun,
+      "-e",
+      "console.log('READY'); setInterval(() => {}, 1000);",
+    ],
+    {
+      cwd: workspace,
+      env: { ...process.env },
+      terminal: {
+        cols: 80,
+        rows: 24,
+        data(_terminal, bytes) {
+          chunks.push(bytes.slice());
+        },
+      },
+    },
+  );
+
+  const output = (): string => new TextDecoder().decode(Buffer.concat(chunks));
+  const waitFor = async (needle: string): Promise<void> => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (output().includes(needle)) return;
+      await Bun.sleep(10);
+    }
+    throw new Error(
+      `timed out waiting for ${JSON.stringify(needle)}; output was ${JSON.stringify(output())}`,
+    );
+  };
+
+  try {
+    await waitFor("READY");
+    child.terminal!.write(Uint8Array.of(0x06)); // Ctrl-F: a first failure to have something to view
+    await waitFor("ctrl-f failed:");
+    child.terminal!.write(Uint8Array.of(0x08)); // Ctrl-H: start a slow failure (fails at ~0.4s)
+    child.terminal!.write(Uint8Array.of(0x05)); // Ctrl-E: open the error viewer over it
+    await waitFor("ccc-morph action error");
+    // The slow command fails while the viewer is open: it is rendered and seen there, and must
+    // NOT leave a persistent failure notice behind.
+    await Bun.sleep(550);
+    child.terminal!.write(Uint8Array.of(0x71)); // q: close the viewer
+    await Bun.sleep(50);
+    child.terminal!.write(Uint8Array.of(0x07)); // Ctrl-G: a successful action
+    // With the stale notice cleared, the completion notice is reported as normal.
+    await waitFor("ctrl-g done in");
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already exited.
+    }
+    child.terminal?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

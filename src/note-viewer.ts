@@ -8,6 +8,11 @@ type NoteViewerControls = {
   // an external editor and then reopens the picker (via refresh).
   edit?: (note: WorkspaceNote) => Promise<void>;
   add?: () => Promise<void>;
+  // Opens the editor pre-filled with the wrapped program's recent output.
+  capture?: () => Promise<void>;
+  // Suspends the picker and opens the history of past responses and plans; the picker is
+  // refreshed on return (whether an item was captured or the history was dismissed).
+  history?: () => void | Promise<void>;
 };
 
 type Tab = "active" | "archive";
@@ -175,7 +180,11 @@ export class NoteViewer {
       this.#askDelete(); // D (Shift-D) — delete, kept off the d scroll key
     else if (token === 0x65)
       void this.#edit(); // e — edit the current note
-    else if (token === 0x61) void this.#add(); // a — add a new note
+    else if (token === 0x61)
+      void this.#add(); // a — add a new note
+    else if (token === 0x63)
+      void this.#capture(); // c — capture the program's latest output
+    else if (token === 0x43) void this.#history(); // C — response/plan history
   }
 
   #layout(): { rows: number; columns: number; listRows: number; previewRows: number } {
@@ -346,6 +355,28 @@ export class NoteViewer {
     }
   }
 
+  async #capture(): Promise<void> {
+    if (!this.#controls.capture) return;
+    this.#busy = true;
+    this.#active = false;
+    try {
+      await this.#controls.capture();
+    } finally {
+      this.#busy = false;
+    }
+  }
+
+  async #history(): Promise<void> {
+    if (!this.#controls.history) return;
+    this.#busy = true;
+    this.#active = false;
+    try {
+      await this.#controls.history();
+    } finally {
+      this.#busy = false;
+    }
+  }
+
   async #restore(): Promise<void> {
     if (this.#tab !== "archive") return;
     const note = this.#current();
@@ -401,7 +432,7 @@ export class NoteViewer {
 
   // Footer row 2: how to create or change a note.
   #createFooter(): string {
-    return " create:  a add note  e edit note ";
+    return " create:  a add  c capture  C history  e edit ";
   }
 
   // Footer row 3: how to manage the list (or a transient status message).

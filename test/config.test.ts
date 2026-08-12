@@ -316,6 +316,24 @@ action = { type = "show-notes" }
     ]);
   });
 
+  test('parses add-note with source = "output" and rejects an invalid source', () => {
+    const config = parseConfigText(`version = 1
+[[bindings]]
+keys = ["ctrl-b", "o"]
+action = { type = "add-note", source = "output" }
+`);
+    const action = config.bindings[0]!.action;
+    expect(action).toEqual({ type: "add-note", source: "output" });
+
+    expect(() =>
+      parseConfigText(`version = 1
+[[bindings]]
+keys = ["ctrl-b", "o"]
+action = { type = "add-note", source = "bogus" }
+`),
+    ).toThrow(/source must be "editor" or "output"/);
+  });
+
   test("an app inherits notes_child_mode from a non-default global", () => {
     const global = `version = 1
 notes_child_mode = "continue"

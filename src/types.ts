@@ -15,6 +15,8 @@ export type QuitAction = { type: "quit" };
 export type IgnoreAction = { type: "ignore" };
 export type AddNoteAction = {
   type: "add-note";
+  // "output" pre-fills the note editor with the wrapped program's recent output.
+  source?: "editor" | "output";
 };
 export type ShowNotesAction = { type: "show-notes" };
 

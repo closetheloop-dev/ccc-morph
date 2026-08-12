@@ -32,7 +32,7 @@ export const DEFAULT_BINDINGS: readonly DefaultBinding[] = [
   {
     keys: ["ctrl-b", "n"],
     actionType: "show-notes",
-    comment: "Ctrl-B N opens the notes hub (in it: a add, e edit).",
+    comment: "Ctrl-B N opens the notes hub (in it: a add, c capture output, e edit).",
   },
 ];
 

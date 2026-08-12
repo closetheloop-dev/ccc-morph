@@ -48,7 +48,9 @@ installs the bundled app configs (Codex and Claude) to `~/.config/ccc-morph/apps
 `ccc-morph --ensure-defaults` to create or top up the global
 `~/.config/ccc-morph/config.toml` with two default bindings: `Ctrl-B E` (error viewer)
 and `Ctrl-B N` (the notes hub). Open the hub to view your notes; inside it, `a` adds a
-note and `e` edits. That command parses your config
+note, `c` captures the program's recent output into a note, `C` browses the recent
+response history (and Claude Code / Codex plans) to capture an earlier one, and `e`
+edits. That command parses your config
 and appends only missing, non-conflicting defaults, so it never overwrites your settings,
 skips a default whose keys you already use, and never leaves an invalid config. The
 archive's checksum covers `install.sh` too.

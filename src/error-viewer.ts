@@ -9,10 +9,14 @@ type ViewerControls = {
 function visible(value: string): string {
   return (
     value
+      // Normalize CRLF to LF first so real line breaks split cleanly and are not left
+      // as an escaped \x0d; a remaining bare \r is escaped as a control below so it cannot
+      // move the cursor and corrupt the rendered error.
+      .replace(/\r\n/g, "\n")
       // biome-ignore lint/suspicious/noControlCharactersInRegex: escaping the ESC byte for display is the point
       .replace(/\x1b/g, "\\x1b")
       // biome-ignore lint/suspicious/noControlCharactersInRegex: rendering control bytes visibly is the point
-      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, (character) => {
+      .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, (character) => {
         return `\\x${character.charCodeAt(0).toString(16).padStart(2, "0")}`;
       })
   );

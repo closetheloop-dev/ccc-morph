@@ -318,6 +318,32 @@ describe("note viewer", () => {
     }
   });
 
+  test("c invokes the capture control from inside the picker", async () => {
+    const { root, store } = fixture();
+    try {
+      let captured = 0;
+      const ref: { viewer?: NoteViewer } = {};
+      ref.viewer = new NoteViewer(store, {
+        close: () => {},
+        submit: async () => {},
+        capture: async () => {
+          captured += 1;
+          await store.add("captured note");
+          ref.viewer?.refresh();
+        },
+      });
+
+      ref.viewer.open();
+      ref.viewer.handleInput(Uint8Array.of(0x63)); // c: capture output
+      await Bun.sleep(5);
+
+      expect(captured).toBe(1);
+      expect(store.load().map((n) => n.text)).toEqual(["captured note"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("refresh reloads the store and keeps the picker active", async () => {
     const { root, store } = fixture();
     try {
