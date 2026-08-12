@@ -25,6 +25,28 @@ works with any interactive program.
 Prebuilt binaries are self-contained, so the target machine needs no Bun, Node.js, or
 Docker.
 
+```sh
+curl -fsSL https://raw.githubusercontent.com/closetheloop-dev/ccc-morph/main/scripts/install.sh | bash
+```
+
+Works on Linux, macOS, and Windows via [WSL2](https://learn.microsoft.com/windows/wsl/)
+(there is no native Windows build). It detects your platform, downloads the matching
+release tarball, **verifies its SHA-256 checksum**, and runs the bundled `install.sh`
+described below. By default it installs the latest release. To pin a version, pass the
+variable to `bash` (placing it before `curl` would apply it only to `curl`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/closetheloop-dev/ccc-morph/main/scripts/install.sh | CCC_MORPH_VERSION=v0.3.0 bash
+```
+
+`INSTALL_DIR` (binary location, default `~/.local/bin`) and `XDG_CONFIG_HOME` (config
+root) are honored the same way, for example `... | INSTALL_DIR="$HOME/bin" bash`.
+To read the installer before running it, pipe it to `less` instead of `bash`.
+
+### Manual install
+
+Prefer to do it by hand, or need to verify before installing? Download the assets yourself:
+
 1. Download `ccc-morph-<version>-<platform>.tar.gz` and `SHA256SUMS.txt` for your
    platform (`linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`) from the
    [releases page](https://github.com/closetheloop-dev/ccc-morph/releases).
