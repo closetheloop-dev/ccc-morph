@@ -1,5 +1,6 @@
+import type { Key } from "./keys";
 import type { ActionError } from "./types";
-import { ViewerInput, type ViewerInputToken } from "./viewer-input";
+import { keyToViewerToken, type ViewerInputToken } from "./viewer-input";
 
 type ViewerControls = {
   pauseChild: () => void;
@@ -25,7 +26,6 @@ function visible(value: string): string {
 export class ErrorViewer {
   readonly #controls: ViewerControls;
   readonly #errors: ActionError[] = [];
-  readonly #input: ViewerInput;
   #active = false;
   #unseen = false;
   #index = 0;
@@ -33,7 +33,6 @@ export class ErrorViewer {
 
   constructor(controls: ViewerControls) {
     this.#controls = controls;
-    this.#input = new ViewerInput((token) => this.#handleToken(token));
   }
 
   get active(): boolean {
@@ -63,7 +62,6 @@ export class ErrorViewer {
     this.#active = true;
     this.#index = this.#errors.length - 1;
     this.#scroll = 0;
-    this.#input.reset();
     this.#controls.pauseChild();
     this.render();
     return true;
@@ -72,17 +70,24 @@ export class ErrorViewer {
   close(): void {
     if (!this.#active) return;
     this.#active = false;
-    this.#input.reset();
     process.stdout.write("\x1b[0m\x1b[2J\x1b[H");
     this.#controls.resumeChild();
+  }
+
+  // Mark the viewer inactive WITHOUT resuming the child (no resume callback, so no replay or
+  // reconciliation). Used by an overflow abort, which resets the terminal from the preserved
+  // modal-opening snapshot itself and must not trigger the normal close/replay path.
+  deactivate(): void {
+    this.#active = false;
   }
 
   resize(): void {
     if (this.#active) this.render();
   }
 
-  handleInput(bytes: Uint8Array): void {
-    this.#input.feed(bytes);
+  handleKey(key: Key): void {
+    const token = keyToViewerToken(key);
+    if (token !== null) this.#handleToken(token);
   }
 
   #handleToken(token: ViewerInputToken): void {

@@ -1,5 +1,6 @@
+import type { Key } from "./keys";
 import type { NoteStore, WorkspaceNote } from "./note-store";
-import { ViewerInput, type ViewerInputToken } from "./viewer-input";
+import { keyToViewerToken, type ViewerInputToken } from "./viewer-input";
 
 type NoteViewerControls = {
   close: () => void;
@@ -51,7 +52,6 @@ function formatLocal(iso: string): string {
 export class NoteViewer {
   readonly #store: NoteStore;
   readonly #controls: NoteViewerControls;
-  readonly #input: ViewerInput;
   #active = false;
   #tab: Tab = "active";
   #notes: WorkspaceNote[] = [];
@@ -65,7 +65,6 @@ export class NoteViewer {
   constructor(store: NoteStore, controls: NoteViewerControls) {
     this.#store = store;
     this.#controls = controls;
-    this.#input = new ViewerInput((token) => this.#handleToken(token));
   }
 
   get active(): boolean {
@@ -81,7 +80,6 @@ export class NoteViewer {
     this.#previewScroll = 0;
     this.#selected.clear();
     this.#message = "";
-    this.#input.reset();
     this.render();
   }
 
@@ -95,19 +93,16 @@ export class NoteViewer {
     const notes = this.#visibleNotes();
     this.#index = Math.max(0, Math.min(this.#index, Math.max(0, notes.length - 1)));
     this.#previewScroll = 0;
-    this.#input.reset();
     this.render();
   }
 
   deactivate(): void {
     this.#active = false;
-    this.#input.reset();
   }
 
   close(): void {
     if (!this.#active) return;
     this.#active = false;
-    this.#input.reset();
     process.stdout.write("\x1b[0m\x1b[2J\x1b[H");
     this.#controls.close();
   }
@@ -116,9 +111,10 @@ export class NoteViewer {
     if (this.#active) this.render();
   }
 
-  handleInput(bytes: Uint8Array): void {
+  handleKey(key: Key): void {
     if (this.#busy) return;
-    this.#input.feed(bytes);
+    const token = keyToViewerToken(key);
+    if (token !== null) this.#handleToken(token);
   }
 
   #handleToken(token: ViewerInputToken): void {

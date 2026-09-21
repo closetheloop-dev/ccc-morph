@@ -2,8 +2,10 @@ import { expect, test } from "bun:test";
 import {
   chmodSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -232,6 +234,87 @@ test("discovered Codex app config ignores one Ctrl-D and sends a double press", 
     await waitFor("DATA:78");
     child.terminal!.write(Uint8Array.of(4, 4));
     await waitFor("DATA:04");
+    expect(await child.exited).toBe(0);
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already exited.
+    }
+    child.terminal?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Kitty CSI-u Ctrl-D: single press is ignored, double press sends one Ctrl-D re-encoded", async () => {
+  const bun = Bun.which("bun");
+  if (!bun) throw new Error("Bun executable not found");
+
+  const directory = mkdtempSync(join(tmpdir(), "ccc-morph-kitty-test-"));
+  const config = join(directory, "config.toml");
+  await Bun.write(
+    config,
+    `version = 1
+sequence_timeout_ms = 50
+[[bindings]]
+keys = ["ctrl-d"]
+action = { type = "ignore" }
+[[bindings]]
+keys = ["ctrl-d", "ctrl-d"]
+action = { type = "send", keys = ["ctrl-d"] }
+`,
+  );
+
+  const chunks: Uint8Array[] = [];
+  // The child turns ON the Kitty keyboard protocol (report all keys as escape
+  // codes), so a Ctrl-D arrives at ccc-morph as CSI-u (ESC[100;5u), not 0x04.
+  const child = Bun.spawn(
+    [
+      bun,
+      "run",
+      resolve(import.meta.dir, "../src/cli.ts"),
+      "--config",
+      config,
+      "--",
+      bun,
+      "-e",
+      "process.stdin.setRawMode(true); process.stdout.write('\\x1b[>8u'); console.log('READY'); process.stdin.on('data', d => { const h = Buffer.from(d).toString('hex'); if (h.includes('71')) process.exit(0); console.log('DATA:' + h); })",
+    ],
+    {
+      cwd: resolve(import.meta.dir, ".."),
+      terminal: {
+        cols: 80,
+        rows: 24,
+        data(_terminal, bytes) {
+          chunks.push(bytes.slice());
+        },
+      },
+    },
+  );
+
+  const output = (): string => new TextDecoder().decode(Buffer.concat(chunks));
+  const waitFor = async (needle: string): Promise<void> => {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (output().includes(needle)) return;
+      await Bun.sleep(10);
+    }
+    throw new Error(
+      `timed out waiting for ${JSON.stringify(needle)}; output ${JSON.stringify(output())}`,
+    );
+  };
+
+  try {
+    await waitFor("READY");
+    // Single CSI-u Ctrl-D -> held then dropped by the `ignore` binding.
+    child.terminal!.write("\x1b[100;5u");
+    await Bun.sleep(150);
+    expect(output()).not.toContain("DATA:1b5b3130303b3575");
+    expect(output()).not.toContain("DATA:04");
+    // Double CSI-u Ctrl-D -> the chord fires and sends ONE Ctrl-D, re-encoded in
+    // the child's active (Kitty) mode: ESC[100;5u == hex 1b5b3130303b3575.
+    child.terminal!.write("\x1b[100;5u\x1b[100;5u");
+    await waitFor("DATA:1b5b3130303b3575");
+    child.terminal!.write("q");
     expect(await child.exited).toBe(0);
   } finally {
     try {
@@ -1734,6 +1817,1122 @@ action = { type = "run", argv = ["true"] }
     child.terminal!.write(Uint8Array.of(0x07)); // Ctrl-G: a successful action
     // With the stale notice cleared, the completion notice is reported as normal.
     await waitFor("ctrl-g done in");
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already exited.
+    }
+    child.terminal?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Kitty disambiguate mode: a send re-encodes Ctrl-D as CSI-u, not legacy 0x04", async () => {
+  const bun = Bun.which("bun");
+  if (!bun) throw new Error("Bun executable not found");
+
+  const directory = mkdtempSync(join(tmpdir(), "ccc-morph-kitty-disambig-test-"));
+  const config = join(directory, "config.toml");
+  await Bun.write(
+    config,
+    `version = 1
+sequence_timeout_ms = 50
+[[bindings]]
+keys = ["ctrl-d"]
+action = { type = "ignore" }
+[[bindings]]
+keys = ["ctrl-d", "ctrl-d"]
+action = { type = "send", keys = ["ctrl-d"] }
+`,
+  );
+
+  const chunks: Uint8Array[] = [];
+  // The child negotiates ONLY the disambiguate flag (CSI > 1 u). Under it, Ctrl-D is
+  // reported (and expected) as CSI-u, so the send must emit ESC[100;5u, not 0x04.
+  const child = Bun.spawn(
+    [
+      bun,
+      "run",
+      resolve(import.meta.dir, "../src/cli.ts"),
+      "--config",
+      config,
+      "--",
+      bun,
+      "-e",
+      "process.stdin.setRawMode(true); process.stdout.write('\\x1b[>1u'); console.log('READY'); process.stdin.on('data', d => { const h = Buffer.from(d).toString('hex'); if (h.includes('71')) process.exit(0); console.log('DATA:' + h); })",
+    ],
+    {
+      cwd: resolve(import.meta.dir, ".."),
+      terminal: {
+        cols: 80,
+        rows: 24,
+        data(_terminal, bytes) {
+          chunks.push(bytes.slice());
+        },
+      },
+    },
+  );
+
+  const output = (): string => new TextDecoder().decode(Buffer.concat(chunks));
+  const waitFor = async (needle: string): Promise<void> => {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (output().includes(needle)) return;
+      await Bun.sleep(10);
+    }
+    throw new Error(
+      `timed out waiting for ${JSON.stringify(needle)}; output ${JSON.stringify(output())}`,
+    );
+  };
+
+  try {
+    await waitFor("READY");
+    child.terminal!.write("\x1b[100;5u"); // single disambiguated Ctrl-D -> held then dropped
+    await Bun.sleep(150);
+    expect(output()).not.toContain("DATA:1b5b3130303b3575");
+    expect(output()).not.toContain("DATA:04");
+    child.terminal!.write("\x1b[100;5u\x1b[100;5u"); // double -> send one Ctrl-D, CSI-u encoded
+    await waitFor("DATA:1b5b3130303b3575");
+    expect(output()).not.toContain("DATA:04"); // never the legacy byte for a flag-1 child
+    child.terminal!.write("q");
+    expect(await child.exited).toBe(0);
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already exited.
+    }
+    child.terminal?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Kitty F3: a decoded CSI 13 ~ matches an f3 chord and a send emits CSI 13 ~", async () => {
+  const bun = Bun.which("bun");
+  if (!bun) throw new Error("Bun executable not found");
+
+  const directory = mkdtempSync(join(tmpdir(), "ccc-morph-kitty-f3-test-"));
+  const config = join(directory, "config.toml");
+  await Bun.write(
+    config,
+    `version = 1
+sequence_timeout_ms = 50
+[[bindings]]
+keys = ["f3"]
+action = { type = "ignore" }
+[[bindings]]
+keys = ["f3", "f3"]
+action = { type = "send", keys = ["f3"] }
+`,
+  );
+
+  const chunks: Uint8Array[] = [];
+  const child = Bun.spawn(
+    [
+      bun,
+      "run",
+      resolve(import.meta.dir, "../src/cli.ts"),
+      "--config",
+      config,
+      "--",
+      bun,
+      "-e",
+      "process.stdin.setRawMode(true); process.stdout.write('\\x1b[>8u'); console.log('READY'); process.stdin.on('data', d => { const h = Buffer.from(d).toString('hex'); if (h.includes('71')) process.exit(0); console.log('DATA:' + h); })",
+    ],
+    {
+      cwd: resolve(import.meta.dir, ".."),
+      terminal: {
+        cols: 80,
+        rows: 24,
+        data(_terminal, bytes) {
+          chunks.push(bytes.slice());
+        },
+      },
+    },
+  );
+
+  const output = (): string => new TextDecoder().decode(Buffer.concat(chunks));
+  const waitFor = async (needle: string): Promise<void> => {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (output().includes(needle)) return;
+      await Bun.sleep(10);
+    }
+    throw new Error(
+      `timed out waiting for ${JSON.stringify(needle)}; output ${JSON.stringify(output())}`,
+    );
+  };
+
+  try {
+    await waitFor("READY");
+    child.terminal!.write("\x1b[13~"); // single F3 -> held then dropped by the ignore binding
+    await Bun.sleep(150);
+    expect(output()).not.toContain("DATA:1b5b31337e");
+    child.terminal!.write("\x1b[13~\x1b[13~"); // double F3 -> send one F3, encoded CSI 13 ~
+    await waitFor("DATA:1b5b31337e");
+    child.terminal!.write("q");
+    expect(await child.exited).toBe(0);
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already exited.
+    }
+    child.terminal?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("wrapper viewers consume CSI-u keys while the child is in report-all-keys mode", async () => {
+  const bun = Bun.which("bun");
+  if (!bun) throw new Error("Bun executable not found");
+
+  const directory = mkdtempSync(join(tmpdir(), "ccc-morph-kitty-viewer-test-"));
+  const workspace = join(directory, "workspace");
+  const xdgRoot = join(directory, "xdg");
+  const config = join(directory, "config.toml");
+  const editor = join(directory, "editor");
+  mkdirSync(workspace);
+  writeFileSync(
+    config,
+    `version = 1
+sequence_timeout_ms = 30
+notes_child_mode = "continue"
+[[bindings]]
+keys = ["ctrl-n"]
+action = { type = "add-note" }
+[[bindings]]
+keys = ["ctrl-p"]
+action = { type = "show-notes" }
+`,
+  );
+  writeFileSync(
+    editor,
+    `#!/usr/bin/env bun
+await Bun.write(Bun.argv.at(-1), "kitty note\\n");
+await Bun.sleep(150);
+`,
+  );
+  chmodSync(editor, 0o755);
+
+  const chunks: Uint8Array[] = [];
+  // report-all-keys is on, so every key ccc-morph receives is a CSI-u sequence.
+  const child = Bun.spawn(
+    [
+      bun,
+      "run",
+      resolve(import.meta.dir, "../src/cli.ts"),
+      "--config",
+      config,
+      "--",
+      bun,
+      "-e",
+      "process.stdin.setRawMode(true); process.stdout.write('\\x1b[>8u'); setInterval(() => {}, 20); console.log('READY'); process.stdin.once('data', d => { console.log('DATA:' + Buffer.from(d).toString('hex')); process.exit(0); })",
+    ],
+    {
+      cwd: workspace,
+      env: { ...process.env, XDG_CONFIG_HOME: xdgRoot, VISUAL: "", EDITOR: editor },
+      terminal: {
+        cols: 80,
+        rows: 24,
+        data(_terminal, bytes) {
+          chunks.push(bytes.slice());
+        },
+      },
+    },
+  );
+
+  const output = (): string => new TextDecoder().decode(Buffer.concat(chunks));
+  const waitFor = async (needle: string): Promise<void> => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (output().includes(needle)) return;
+      await Bun.sleep(10);
+    }
+    throw new Error(
+      `timed out waiting for ${JSON.stringify(needle)}; output ${JSON.stringify(output())}`,
+    );
+  };
+
+  try {
+    await waitFor("READY");
+    child.terminal!.write("\x1b[110;5u"); // Ctrl-N as CSI-u: add a note (matcher under flag 8)
+    await waitFor("[ccc-morph] note saved");
+    child.terminal!.write("\x1b[112;5u"); // Ctrl-P as CSI-u: open the notes hub
+    await waitFor("ccc-morph notes [active]");
+    // The hub commands now arrive as CSI-u: Space selects, Enter submits (which closes it).
+    child.terminal!.write("\x1b[32u"); // Space
+    child.terminal!.write("\x1b[13u"); // Enter
+    const expected = Buffer.from("\x1b[200~kitty note\x1b[201~").toString("hex");
+    await waitFor(`DATA:${expected}`);
+    expect(await child.exited).toBe(0);
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already exited.
+    }
+    child.terminal?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("continue-mode: a mode change behind a modal is reconciled to the terminal on close", async () => {
+  const bun = Bun.which("bun");
+  if (!bun) throw new Error("Bun executable not found");
+
+  const directory = mkdtempSync(join(tmpdir(), "ccc-morph-kitty-modesync-test-"));
+  const workspace = join(directory, "workspace");
+  const xdgRoot = join(directory, "xdg");
+  const config = join(directory, "config.toml");
+  mkdirSync(workspace);
+  writeFileSync(
+    config,
+    `version = 1
+sequence_timeout_ms = 30
+notes_child_mode = "continue"
+[[bindings]]
+keys = ["ctrl-p"]
+action = { type = "show-notes" }
+`,
+  );
+
+  const chunks: Uint8Array[] = [];
+  // The child pushes Kitty flag 8 up front, then pops it ~400ms later — which lands
+  // while the notes modal is open, so the pop is suppressed from the terminal.
+  const child = Bun.spawn(
+    [
+      bun,
+      "run",
+      resolve(import.meta.dir, "../src/cli.ts"),
+      "--config",
+      config,
+      "--",
+      bun,
+      "-e",
+      "process.stdin.setRawMode(true); process.stdin.on('data', () => {}); process.stdout.write('\\x1b[>8u'); console.log('READY'); setTimeout(() => process.stdout.write('\\x1b[<u'), 400)",
+    ],
+    {
+      cwd: workspace,
+      env: { ...process.env, XDG_CONFIG_HOME: xdgRoot },
+      terminal: {
+        cols: 80,
+        rows: 24,
+        data(_terminal, bytes) {
+          chunks.push(bytes.slice());
+        },
+      },
+    },
+  );
+
+  const output = (): string => new TextDecoder().decode(Buffer.concat(chunks));
+  const waitFor = async (needle: string): Promise<void> => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (output().includes(needle)) return;
+      await Bun.sleep(10);
+    }
+    throw new Error(
+      `timed out waiting for ${JSON.stringify(needle)}; output ${JSON.stringify(output())}`,
+    );
+  };
+
+  try {
+    await waitFor("READY");
+    child.terminal!.write(Uint8Array.of(16)); // Ctrl-P: open the notes hub (snapshot [8])
+    await waitFor("ccc-morph notes [active]");
+    await Bun.sleep(600); // the child's pop (at ~400ms) happens behind the modal, suppressed
+    expect(output()).not.toContain("\x1b[<u"); // the suppressed pop was not delivered yet
+    child.terminal!.write("q"); // close the hub
+    // Closing replays the child's captured pop control to the terminal verbatim.
+    await waitFor("\x1b[<u");
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already exited.
+    }
+    child.terminal?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("child output keeps its byte order: a screen switch is not reordered past a Kitty push", async () => {
+  const bun = Bun.which("bun");
+  if (!bun) throw new Error("Bun executable not found");
+
+  const directory = mkdtempSync(join(tmpdir(), "ccc-morph-kitty-order-test-"));
+  const config = join(directory, "config.toml");
+  await Bun.write(config, "version = 1\n");
+
+  const chunks: Uint8Array[] = [];
+  // One chunk: enter alternate screen, THEN push Kitty mode, then a marker.
+  const child = Bun.spawn(
+    [
+      bun,
+      "run",
+      resolve(import.meta.dir, "../src/cli.ts"),
+      "--config",
+      config,
+      "--",
+      bun,
+      "-e",
+      "process.stdout.write('\\x1b[?1049h\\x1b[>8uORDERMARK'); console.log('READY'); setInterval(() => {}, 100)",
+    ],
+    {
+      cwd: resolve(import.meta.dir, ".."),
+      terminal: {
+        cols: 80,
+        rows: 24,
+        data(_terminal, bytes) {
+          chunks.push(bytes.slice());
+        },
+      },
+    },
+  );
+
+  const output = (): string => new TextDecoder().decode(Buffer.concat(chunks));
+  try {
+    for (let attempt = 0; attempt < 100 && !output().includes("ORDERMARK"); attempt += 1) {
+      await Bun.sleep(10);
+    }
+    const out = output();
+    const altScreen = out.indexOf("\x1b[?1049h");
+    const push = out.indexOf("\x1b[>8u");
+    expect(altScreen).toBeGreaterThanOrEqual(0);
+    expect(push).toBeGreaterThanOrEqual(0);
+    expect(altScreen).toBeLessThan(push); // original order preserved, not reordered
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already exited.
+    }
+    child.terminal?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("release bookkeeping survives a modal: no orphan releases leak to the child", async () => {
+  const bun = Bun.which("bun");
+  if (!bun) throw new Error("Bun executable not found");
+
+  const directory = mkdtempSync(join(tmpdir(), "ccc-morph-kitty-release-test-"));
+  const workspace = join(directory, "workspace");
+  const xdgRoot = join(directory, "xdg");
+  const config = join(directory, "config.toml");
+  mkdirSync(workspace);
+  writeFileSync(
+    config,
+    `version = 1
+sequence_timeout_ms = 30
+notes_child_mode = "continue"
+[[bindings]]
+keys = ["ctrl-p"]
+action = { type = "show-notes" }
+`,
+  );
+
+  const chunks: Uint8Array[] = [];
+  // report-all-keys + event-types: every key (incl. releases) is a CSI-u sequence.
+  const child = Bun.spawn(
+    [
+      bun,
+      "run",
+      resolve(import.meta.dir, "../src/cli.ts"),
+      "--config",
+      config,
+      "--",
+      bun,
+      "-e",
+      "process.stdin.setRawMode(true); process.stdout.write('\\x1b[>10u'); console.log('READY'); process.stdin.on('data', d => { const h = Buffer.from(d).toString('hex'); console.log('DATA:' + h); if (h.includes('7a')) process.exit(0); })",
+    ],
+    {
+      cwd: workspace,
+      env: { ...process.env, XDG_CONFIG_HOME: xdgRoot },
+      terminal: {
+        cols: 80,
+        rows: 24,
+        data(_terminal, bytes) {
+          chunks.push(bytes.slice());
+        },
+      },
+    },
+  );
+
+  const output = (): string => new TextDecoder().decode(Buffer.concat(chunks));
+  const waitFor = async (needle: string): Promise<void> => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (output().includes(needle)) return;
+      await Bun.sleep(10);
+    }
+    throw new Error(
+      `timed out waiting for ${JSON.stringify(needle)}; output ${JSON.stringify(output())}`,
+    );
+  };
+
+  try {
+    await waitFor("READY");
+    // Open the hub: Ctrl-P press and release arrive in SEPARATE chunks. The press is
+    // consumed by the matcher (opening the modal); its release, arriving with the
+    // modal active, must be swallowed, not left owed.
+    child.terminal!.write("\x1b[112;5u");
+    await Bun.sleep(20);
+    child.terminal!.write("\x1b[112;5:3u");
+    await waitFor("ccc-morph notes [active]");
+    // A viewer navigation key, press and release split. Consumed by the viewer.
+    child.terminal!.write("\x1b[106u"); // j press
+    await Bun.sleep(20);
+    child.terminal!.write("\x1b[106;1:3u"); // j release
+    await Bun.sleep(20);
+    // Close key: press closes the modal; its release arrives AFTER the modal closed
+    // and must still be swallowed (not forwarded to the child as an orphan).
+    child.terminal!.write("\x1b[113u"); // q press -> close
+    await Bun.sleep(30);
+    child.terminal!.write("\x1b[113;1:3u"); // q release (modal now closed)
+    await Bun.sleep(30);
+    // Sentinel: a plain key that SHOULD reach the child, proving passthrough still
+    // works and giving us a definite end marker.
+    child.terminal!.write("z");
+    expect(await child.exited).toBe(0);
+    // The only thing the child ever received is the sentinel: no CSI-u press or
+    // release for Ctrl-P / j / q leaked through as an orphan event.
+    expect(output()).toContain("DATA:7a");
+    expect(output()).not.toContain("DATA:1b5b");
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already exited.
+    }
+    child.terminal?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("exiting during a continue-mode modal still resets the terminal to legacy", async () => {
+  const bun = Bun.which("bun");
+  if (!bun) throw new Error("Bun executable not found");
+
+  const directory = mkdtempSync(join(tmpdir(), "ccc-morph-kitty-exit-reset-test-"));
+  const workspace = join(directory, "workspace");
+  const xdgRoot = join(directory, "xdg");
+  const config = join(directory, "config.toml");
+  mkdirSync(workspace);
+  writeFileSync(
+    config,
+    `version = 1
+sequence_timeout_ms = 30
+notes_child_mode = "continue"
+[[bindings]]
+keys = ["ctrl-p"]
+action = { type = "show-notes" }
+`,
+  );
+
+  const chunks: Uint8Array[] = [];
+  // The child pushes Kitty flag 8, then pops it and exits ~500ms later — while the
+  // notes modal is open, so the pop is suppressed from the terminal.
+  const child = Bun.spawn(
+    [
+      bun,
+      "run",
+      resolve(import.meta.dir, "../src/cli.ts"),
+      "--config",
+      config,
+      "--",
+      bun,
+      "-e",
+      "process.stdin.setRawMode(true); process.stdin.on('data', () => {}); process.stdout.write('\\x1b[>8u'); console.log('READY'); setTimeout(() => { process.stdout.write('\\x1b[<u'); process.exit(0); }, 500)",
+    ],
+    {
+      cwd: workspace,
+      env: { ...process.env, XDG_CONFIG_HOME: xdgRoot },
+      terminal: {
+        cols: 80,
+        rows: 24,
+        data(_terminal, bytes) {
+          chunks.push(bytes.slice());
+        },
+      },
+    },
+  );
+
+  const output = (): string => new TextDecoder().decode(Buffer.concat(chunks));
+  const waitFor = async (needle: string): Promise<void> => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (output().includes(needle)) return;
+      await Bun.sleep(10);
+    }
+    throw new Error(
+      `timed out waiting for ${JSON.stringify(needle)}; output ${JSON.stringify(output())}`,
+    );
+  };
+
+  try {
+    await waitFor("READY");
+    child.terminal!.write(Uint8Array.of(16)); // Ctrl-P: open the notes hub (snapshot [8])
+    await waitFor("ccc-morph notes [active]");
+    // The child pops (suppressed) and exits behind the open modal.
+    expect(await child.exited).toBe(0);
+    await Bun.sleep(50);
+    // Cleanup resets from the state the terminal was actually left in (the snapshot),
+    // popping the enhancement the suppressed pop never delivered.
+    expect(output()).toContain("\x1b[<u");
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already exited.
+    }
+    child.terminal?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("continue-mode: a screen entered behind a modal is restored to the terminal on close", async () => {
+  const bun = Bun.which("bun");
+  if (!bun) throw new Error("Bun executable not found");
+
+  const directory = mkdtempSync(join(tmpdir(), "ccc-morph-kitty-screen-test-"));
+  const workspace = join(directory, "workspace");
+  const xdgRoot = join(directory, "xdg");
+  const config = join(directory, "config.toml");
+  mkdirSync(workspace);
+  writeFileSync(
+    config,
+    `version = 1
+sequence_timeout_ms = 30
+notes_child_mode = "continue"
+[[bindings]]
+keys = ["ctrl-p"]
+action = { type = "show-notes" }
+`,
+  );
+
+  const chunks: Uint8Array[] = [];
+  // ~400ms in (while the modal is open) the child enters the alternate screen and
+  // pushes Kitty flag 8 — both suppressed from the terminal.
+  const child = Bun.spawn(
+    [
+      bun,
+      "run",
+      resolve(import.meta.dir, "../src/cli.ts"),
+      "--config",
+      config,
+      "--",
+      bun,
+      "-e",
+      "process.stdin.setRawMode(true); process.stdin.on('data', () => {}); console.log('READY'); setTimeout(() => process.stdout.write('\\x1b[?1049h\\x1b[>8u'), 400)",
+    ],
+    {
+      cwd: workspace,
+      env: { ...process.env, XDG_CONFIG_HOME: xdgRoot },
+      terminal: {
+        cols: 80,
+        rows: 24,
+        data(_terminal, bytes) {
+          chunks.push(bytes.slice());
+        },
+      },
+    },
+  );
+
+  const output = (): string => new TextDecoder().decode(Buffer.concat(chunks));
+  const waitFor = async (needle: string): Promise<void> => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (output().includes(needle)) return;
+      await Bun.sleep(10);
+    }
+    throw new Error(
+      `timed out waiting for ${JSON.stringify(needle)}; output ${JSON.stringify(output())}`,
+    );
+  };
+
+  try {
+    await waitFor("READY");
+    child.terminal!.write(Uint8Array.of(16)); // Ctrl-P: open the notes hub (snapshot main)
+    await waitFor("ccc-morph notes [active]");
+    await Bun.sleep(600); // the child enters alt + pushes 8 behind the modal (suppressed)
+    expect(output()).not.toContain("\x1b[?1049h"); // not delivered while suppressed
+    child.terminal!.write("q"); // close the hub -> reconcile
+    // Reconcile enters the alternate screen the child moved to and re-pushes flag 8.
+    await waitFor("\x1b[?1049h\x1b[>8u");
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already exited.
+    }
+    child.terminal?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("viewer release uses the exposed terminal flags, not the child's hidden mode", async () => {
+  const bun = Bun.which("bun");
+  if (!bun) throw new Error("Bun executable not found");
+
+  const directory = mkdtempSync(join(tmpdir(), "ccc-morph-kitty-exposed-test-"));
+  const workspace = join(directory, "workspace");
+  const xdgRoot = join(directory, "xdg");
+  const config = join(directory, "config.toml");
+  mkdirSync(workspace);
+  writeFileSync(
+    config,
+    `version = 1
+sequence_timeout_ms = 30
+notes_child_mode = "continue"
+[[bindings]]
+keys = ["ctrl-p"]
+action = { type = "show-notes" }
+`,
+  );
+
+  const chunks: Uint8Array[] = [];
+  // The terminal is exposed at flags 10 (event-types + report-all). ~400ms in the
+  // child pops back to legacy behind the modal — a hidden transition the terminal is
+  // never told about, so it keeps sending CSI-u.
+  const child = Bun.spawn(
+    [
+      bun,
+      "run",
+      resolve(import.meta.dir, "../src/cli.ts"),
+      "--config",
+      config,
+      "--",
+      bun,
+      "-e",
+      "process.stdin.setRawMode(true); process.stdout.write('\\x1b[>10u'); console.log('READY'); process.stdin.on('data', d => { const h = Buffer.from(d).toString('hex'); console.log('DATA:' + h); if (h.includes('7a')) process.exit(0); }); setTimeout(() => process.stdout.write('\\x1b[<u'), 400)",
+    ],
+    {
+      cwd: workspace,
+      env: { ...process.env, XDG_CONFIG_HOME: xdgRoot },
+      terminal: {
+        cols: 80,
+        rows: 24,
+        data(_terminal, bytes) {
+          chunks.push(bytes.slice());
+        },
+      },
+    },
+  );
+
+  const output = (): string => new TextDecoder().decode(Buffer.concat(chunks));
+  const waitFor = async (needle: string): Promise<void> => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (output().includes(needle)) return;
+      await Bun.sleep(10);
+    }
+    throw new Error(
+      `timed out waiting for ${JSON.stringify(needle)}; output ${JSON.stringify(output())}`,
+    );
+  };
+
+  try {
+    await waitFor("READY");
+    child.terminal!.write("\x1b[112;5u"); // Ctrl-P as CSI-u: open the notes hub
+    await waitFor("ccc-morph notes [active]");
+    await Bun.sleep(500); // child pops to legacy behind the modal (suppressed)
+    // A viewer key, still encoded CSI-u by the terminal (exposed flags 10): its press
+    // drives the viewer and its release must be swallowed against the exposed flags,
+    // not forwarded to the child as an orphan just because the child's hidden mode is 0.
+    child.terminal!.write("\x1b[106u"); // j press
+    await Bun.sleep(20);
+    child.terminal!.write("\x1b[106;1:3u"); // j release
+    await Bun.sleep(30);
+    child.terminal!.write("\x1b[113u"); // q press -> close the hub
+    await Bun.sleep(40);
+    child.terminal!.write("z"); // sentinel that the child should receive
+    expect(await child.exited).toBe(0);
+    expect(output()).toContain("DATA:7a"); // sentinel reached the child
+    expect(output()).not.toContain("DATA:1b5b"); // no CSI-u orphan reached the child
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already exited.
+    }
+    child.terminal?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a Kitty control split by modal open (exposed prefix, suppressed suffix) is replayed whole", async () => {
+  const bun = Bun.which("bun");
+  if (!bun) throw new Error("Bun executable not found");
+
+  const directory = mkdtempSync(join(tmpdir(), "ccc-morph-kitty-splitopen-test-"));
+  const workspace = join(directory, "workspace");
+  const xdgRoot = join(directory, "xdg");
+  const config = join(directory, "config.toml");
+  mkdirSync(workspace);
+  writeFileSync(
+    config,
+    `version = 1
+sequence_timeout_ms = 30
+notes_child_mode = "continue"
+[[bindings]]
+keys = ["ctrl-p"]
+action = { type = "show-notes" }
+`,
+  );
+
+  const chunks: Uint8Array[] = [];
+  // The child emits the START of a Kitty push (ESC [ >) at ~100ms — before the modal
+  // opens, so it reaches the terminal — then the rest (8 u) at ~500ms, while the modal
+  // is open and suppressing output. The modal's own render cancels the partial prefix
+  // on the terminal, so the wrapper must replay the WHOLE control on close.
+  const child = Bun.spawn(
+    [
+      bun,
+      "run",
+      resolve(import.meta.dir, "../src/cli.ts"),
+      "--config",
+      config,
+      "--",
+      bun,
+      "-e",
+      "process.stdin.setRawMode(true); process.stdin.on('data', () => {}); console.log('READY'); setTimeout(() => process.stdout.write('\\x1b[>'), 100); setTimeout(() => process.stdout.write('8u'), 500)",
+    ],
+    {
+      cwd: workspace,
+      env: { ...process.env, XDG_CONFIG_HOME: xdgRoot },
+      terminal: {
+        cols: 80,
+        rows: 24,
+        data(_terminal, bytes) {
+          chunks.push(bytes.slice());
+        },
+      },
+    },
+  );
+
+  const output = (): string => new TextDecoder().decode(Buffer.concat(chunks));
+  const waitFor = async (needle: string): Promise<void> => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (output().includes(needle)) return;
+      await Bun.sleep(10);
+    }
+    throw new Error(
+      `timed out waiting for ${JSON.stringify(needle)}; output ${JSON.stringify(output())}`,
+    );
+  };
+
+  try {
+    await waitFor("READY");
+    await Bun.sleep(250); // the child's exposed "ESC [ >" prefix has been written
+    child.terminal!.write(Uint8Array.of(16)); // Ctrl-P: open the notes hub (renders, cancels prefix)
+    await waitFor("ccc-morph notes [active]");
+    await Bun.sleep(400); // the child's "8u" suffix arrives suppressed behind the modal
+    child.terminal!.write("q"); // close the hub -> replay
+    // The whole control is replayed to re-establish it (the exposed prefix was cancelled).
+    await waitFor("\x1b[>8u");
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already exited.
+    }
+    child.terminal?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a Kitty control whose prefix is hidden behind a modal is written whole after close, not orphaned", async () => {
+  const bun = Bun.which("bun");
+  if (!bun) throw new Error("Bun executable not found");
+
+  const directory = mkdtempSync(join(tmpdir(), "ccc-morph-kitty-hiddenprefix-test-"));
+  const workspace = join(directory, "workspace");
+  const xdgRoot = join(directory, "xdg");
+  const config = join(directory, "config.toml");
+  mkdirSync(workspace);
+  writeFileSync(
+    config,
+    `version = 1
+sequence_timeout_ms = 30
+notes_child_mode = "continue"
+[[bindings]]
+keys = ["ctrl-p"]
+action = { type = "show-notes" }
+`,
+  );
+
+  const chunks: Uint8Array[] = [];
+  // The child emits the START of a Kitty push (ESC [ >) at ~400ms — AFTER the modal has
+  // opened, so it is suppressed and held — then the rest (8 u) at ~900ms, after the modal
+  // has closed. The close writes wrapper bytes (the redraw/reassert): if the wrapper had
+  // flushed the incomplete prefix on close, those bytes would sit between an orphaned
+  // "ESC [ >" and a later bare "8 u". Instead the prefix stays held and feed emits the
+  // whole control at once, so ESC[>8u appears contiguously in the terminal stream.
+  const child = Bun.spawn(
+    [
+      bun,
+      "run",
+      resolve(import.meta.dir, "../src/cli.ts"),
+      "--config",
+      config,
+      "--",
+      bun,
+      "-e",
+      "process.stdin.setRawMode(true); process.stdin.on('data', () => {}); console.log('READY'); setTimeout(() => process.stdout.write('\\x1b[>'), 400); setTimeout(() => process.stdout.write('8u'), 900)",
+    ],
+    {
+      cwd: workspace,
+      env: { ...process.env, XDG_CONFIG_HOME: xdgRoot },
+      terminal: {
+        cols: 80,
+        rows: 24,
+        data(_terminal, bytes) {
+          chunks.push(bytes.slice());
+        },
+      },
+    },
+  );
+
+  const output = (): string => new TextDecoder().decode(Buffer.concat(chunks));
+  const waitFor = async (needle: string): Promise<void> => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (output().includes(needle)) return;
+      await Bun.sleep(10);
+    }
+    throw new Error(
+      `timed out waiting for ${JSON.stringify(needle)}; output ${JSON.stringify(output())}`,
+    );
+  };
+
+  try {
+    await waitFor("READY");
+    child.terminal!.write(Uint8Array.of(16)); // Ctrl-P: open the notes hub before the prefix
+    await waitFor("ccc-morph notes [active]");
+    await Bun.sleep(550); // the child's "ESC [ >" prefix arrives suppressed and is held
+    child.terminal!.write("q"); // close the hub -> redraw writes wrapper bytes
+    await Bun.sleep(500); // the child's "8u" suffix arrives exposed, after the close
+    // The prefix was never written on its own, so the whole control appears contiguously.
+    await waitFor("\x1b[>8u");
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already exited.
+    }
+    child.terminal?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("a child flooding mode controls behind a modal terminates the session safely", async () => {
+  const bun = Bun.which("bun");
+  if (!bun) throw new Error("Bun executable not found");
+
+  const directory = mkdtempSync(join(tmpdir(), "ccc-morph-kitty-overflow-test-"));
+  const workspace = join(directory, "workspace");
+  const xdgRoot = join(directory, "xdg");
+  const config = join(directory, "config.toml");
+  mkdirSync(workspace);
+  writeFileSync(
+    config,
+    `version = 1
+sequence_timeout_ms = 30
+notes_child_mode = "continue"
+[[bindings]]
+keys = ["ctrl-p"]
+action = { type = "show-notes" }
+`,
+  );
+
+  const chunks: Uint8Array[] = [];
+  // The child ENABLES an enhanced keyboard mode (push 8) BEFORE any modal opens, so the outer
+  // terminal is genuinely enhanced when the modal freezes it. Then, well after the modal is
+  // open, it emits far more than the replay limit (256 KiB) of recognized mode controls in one
+  // burst. The wrapper must not grow without bound: it makes its safe overflow transition --
+  // reset the outer terminal from the modal-opening snapshot (popping the enhanced mode) and
+  // terminate -- and exits.
+  const child = Bun.spawn(
+    [
+      bun,
+      "run",
+      resolve(import.meta.dir, "../src/cli.ts"),
+      "--config",
+      config,
+      "--",
+      bun,
+      "-e",
+      "process.stdin.setRawMode(true);process.stdin.on('data',()=>{});process.stdout.write('\\x1b[>8u');console.log('READY');" +
+        "setTimeout(()=>{let s='';for(let i=0;i<60000;i++)s+='\\x1b[>0u\\x1b[<u';process.stdout.write(s)},400)",
+    ],
+    {
+      cwd: workspace,
+      env: { ...process.env, XDG_CONFIG_HOME: xdgRoot },
+      terminal: {
+        cols: 80,
+        rows: 24,
+        data(_terminal, bytes) {
+          chunks.push(bytes.slice());
+        },
+      },
+    },
+  );
+
+  const output = (): string => new TextDecoder().decode(Buffer.concat(chunks));
+  const waitFor = async (needle: string): Promise<void> => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (output().includes(needle)) return;
+      await Bun.sleep(10);
+    }
+    throw new Error(`timed out waiting for ${JSON.stringify(needle)}`);
+  };
+
+  try {
+    await waitFor("READY");
+    await Bun.sleep(60); // the child's "\x1b[>8u" is observed, so the modal snapshot is enhanced
+    const beforeModal = output().length;
+    child.terminal!.write(Uint8Array.of(16)); // Ctrl-P: open the continue-mode hub
+    await waitFor("ccc-morph notes [active]");
+    // The child floods ~600 KB of mode controls; the wrapper terminates rather than retain it.
+    const exitCode = await Promise.race([
+      child.exited,
+      Bun.sleep(4000).then(() => "timeout" as const),
+    ]);
+    expect(exitCode).toBe(1);
+    // The user's terminal was reset from the enhanced modal-opening snapshot (the enhanced
+    // push is popped) and told why -- not left enhanced or reset from a diverged state.
+    const afterModal = output().slice(beforeModal);
+    expect(afterModal).toContain("\x1b[<u"); // pop of the outstanding enhanced mode
+    expect(afterModal).toContain("[ccc-morph] terminated");
+  } finally {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already exited.
+    }
+    child.terminal?.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("overflow while an external editor is open lets it exit cleanly, leaving the shell on main", async () => {
+  const bun = Bun.which("bun");
+  if (!bun) throw new Error("Bun executable not found");
+
+  const directory = mkdtempSync(join(tmpdir(), "ccc-morph-editor-overflow-test-"));
+  const workspace = join(directory, "workspace");
+  const xdgRoot = join(directory, "xdg");
+  const config = join(directory, "config.toml");
+  const pidMarker = join(directory, "editor.pid");
+  const pathMarker = join(directory, "editor.notepath");
+  const editorScript = join(directory, "fake-editor.sh");
+  mkdirSync(workspace);
+  writeFileSync(
+    config,
+    `version = 1
+sequence_timeout_ms = 30
+notes_child_mode = "continue"
+[[bindings]]
+keys = ["ctrl-n"]
+action = { type = "add-note" }
+`,
+  );
+  // An "editor" that writes DIRECTLY to the inherited outer terminal (bypassing the observer):
+  // it enters the alternate screen and pushes a Kitty keyboard flag, records its lifecycle,
+  // then waits for the user to quit. On quit it performs its OWN teardown (pop the flag, leave
+  // the alternate screen) and exits. A wrapper that force-killed it mid-overflow would skip
+  // this teardown and strand the shell on the alternate screen.
+  writeFileSync(
+    editorScript,
+    `#!/bin/sh\nprintf '\\033[?1049h'\nprintf '\\033[>1u'\n` +
+      `echo "$$" > "${pidMarker}"\necho "$1" > "${pathMarker}"\n` +
+      `read _ignored\nprintf '\\033[<u'\nprintf '\\033[?1049l'\n`,
+    { mode: 0o755 },
+  );
+
+  const chunks: Uint8Array[] = [];
+  // The wrapped child floods past the replay limit on an interval; once the editor modal is
+  // open the next burst overflows and the wrapper kills the child (the flood source).
+  const child = Bun.spawn(
+    [
+      bun,
+      "run",
+      resolve(import.meta.dir, "../src/cli.ts"),
+      "--config",
+      config,
+      "--",
+      bun,
+      "-e",
+      "process.stdin.setRawMode(true);process.stdin.on('data',()=>{});console.log('READY');" +
+        "let s='';for(let i=0;i<60000;i++)s+='\\x1b[>0u\\x1b[<u';setInterval(()=>process.stdout.write(s),400)",
+    ],
+    {
+      cwd: workspace,
+      env: { ...process.env, XDG_CONFIG_HOME: xdgRoot, EDITOR: editorScript, VISUAL: "" },
+      terminal: {
+        cols: 80,
+        rows: 24,
+        data(_terminal, bytes) {
+          chunks.push(bytes.slice());
+        },
+      },
+    },
+  );
+
+  const output = (): string => new TextDecoder().decode(Buffer.concat(chunks));
+  const waitFor = async (needle: string, attempts = 500): Promise<void> => {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      if (output().includes(needle)) return;
+      await Bun.sleep(10);
+    }
+    throw new Error(`timed out waiting for ${JSON.stringify(needle)}`);
+  };
+  const waitForFile = async (path: string): Promise<void> => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      if (existsSync(path)) return;
+      await Bun.sleep(10);
+    }
+    throw new Error(`timed out waiting for ${path}`);
+  };
+
+  try {
+    await waitFor("READY");
+    child.terminal!.write(Uint8Array.of(14)); // Ctrl-N: add-note -> launch the external editor
+    await waitForFile(pidMarker); // the editor is running
+    await waitFor("\x1b[?1049h"); // ...and has entered the alternate screen directly
+    const editorPid = Number.parseInt(readFileSync(pidMarker, "utf8").trim(), 10);
+    const noteDir = join(readFileSync(pathMarker, "utf8").trim(), "..");
+
+    // Give the flood time to overflow and the wrapper to kill the wrapped child. The wrapper
+    // must NOT have killed the editor; it is left running until the user quits it.
+    await Bun.sleep(1500);
+    expect(output()).not.toContain("[ccc-morph] terminated"); // still waiting on the editor
+    let editorAliveDuring = true;
+    try {
+      process.kill(editorPid, 0);
+    } catch {
+      editorAliveDuring = false;
+    }
+    expect(editorAliveDuring).toBe(true); // NOT force-killed
+
+    // The user quits the editor; it performs its own teardown (leave alt screen, pop the flag).
+    child.terminal!.write("q\r");
+    await waitFor("[ccc-morph] terminated");
+    const exitCode = await Promise.race([
+      child.exited,
+      Bun.sleep(5000).then(() => "timeout" as const),
+    ]);
+    expect(exitCode).toBe(1);
+
+    // The editor's own teardown ran (it left the alternate screen) BEFORE the wrapper's
+    // diagnostic, so the shell-facing terminal is back on main -- not stranded on alt.
+    const full = output();
+    expect(full).toContain("\x1b[?1049l"); // editor left the alternate screen
+    expect(full.indexOf("\x1b[?1049l")).toBeLessThan(full.indexOf("[ccc-morph] terminated"));
+
+    // Nothing orphaned: the editor exited and its temp dir was cleaned by #runEditor's finally.
+    let editorAlive = true;
+    try {
+      process.kill(editorPid, 0);
+    } catch {
+      editorAlive = false;
+    }
+    expect(editorAlive).toBe(false);
+    expect(existsSync(noteDir)).toBe(false);
   } finally {
     try {
       child.kill("SIGKILL");

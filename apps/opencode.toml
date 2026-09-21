@@ -1,0 +1,13 @@
+version = 1
+sequence_timeout_ms = 1000
+notes_child_mode = "continue"
+
+# Discard a single Ctrl-D after the double-press window expires.
+[[bindings]]
+keys = ["ctrl-d"]
+action = { type = "ignore" }
+
+# Send one Ctrl-D to opencode when Ctrl-D is pressed twice within the window.
+[[bindings]]
+keys = ["ctrl-d", "ctrl-d"]
+action = { type = "send", keys = ["ctrl-d"] }

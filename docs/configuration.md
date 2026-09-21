@@ -116,12 +116,29 @@ Bindings and `send` actions accept:
   `shift-alt-f5`)
 - Exact bytes as `hex:1b5b41`
 
-Terminal protocols sometimes encode different-looking key combinations identically.
-The configuration is rejected if two bindings compile to the same byte sequence. Raw
-hexadecimal bindings are available for terminal-specific sequences. Combinations
-such as `ctrl-enter`, `shift-enter`, and `ctrl-tab` have no universal legacy-terminal
-encoding and are deliberately not guessed. Use `ccc-morph --inspect-key`, then bind
-the reported `hex:` value when your terminal supports one of them.
+Terminal protocols sometimes encode different-looking key combinations identically, so
+the configuration is rejected if two bindings resolve to the same key chord.
+
+### Modern terminals (Kitty keyboard protocol)
+
+Many current terminals (Ghostty, Foot, kitty, WezTerm, recent GNOME/VTE) implement the
+Kitty keyboard protocol. When a wrapped program turns it on, keys arrive as `CSI u` escape
+sequences that report their modifiers explicitly instead of as legacy control bytes.
+ccc-morph tracks the program's negotiated keyboard mode, decodes those sequences so your
+bindings still match, and re-encodes `send` actions in the mode the program is currently
+using.
+
+Because modifiers are reported explicitly, combinations a legacy terminal cannot
+distinguish now work as plain named bindings on a protocol-capable terminal, for example
+`ctrl-enter`, `shift-enter`, and `ctrl-tab`. These resolve only where the protocol is
+active: on a legacy terminal `Ctrl-Enter` sends the same bytes as `Enter`, so such a
+binding will not match there.
+
+`hex:` bindings remain available for terminal-specific byte sequences, but a `hex:` value
+is the exact bytes captured from one terminal in one mode. It will not match the `CSI u`
+form the same key produces once the program enables the protocol, so prefer a named binding
+when one exists and reserve `hex:` for sequences that have no name. Use `ccc-morph
+--inspect-key` to see the bytes a key currently produces.
 
 ## Choosing keys
 
@@ -210,9 +227,10 @@ While the notes hub, response history, or editor is open, `notes_child_mode` con
 program. `"pause"` freezes it (with `SIGSTOP`) so it cannot repaint over the modal; `"continue"`
 leaves it running. `"pause"` is the **global** default, which protects programs that stream raw,
 append-only output (a bare shell, `tail -f`) from losing what they print while a modal is open. The
-bundled `apps/claude.toml` and `apps/codex.toml`, however, set `notes_child_mode = "continue"`,
-because both are full-screen TUIs that redraw cleanly on close. So a normally installed Claude Code or
-Codex session runs with `"continue"`; the `"pause"` default applies to other programs and to any app
+bundled `apps/claude.toml`, `apps/codex.toml`, and `apps/opencode.toml`, however, set
+`notes_child_mode = "continue"`, because they are full-screen TUIs that redraw cleanly on close. So a
+normally installed Claude Code, Codex, or opencode session runs with `"continue"`; the `"pause"`
+default applies to other programs and to any app
 without that override. Set it in the global config or per app.
 
 Set `source = "output"` on `add-note` to open the editor pre-filled with the wrapped program's

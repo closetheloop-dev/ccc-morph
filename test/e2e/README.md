@@ -31,7 +31,7 @@ bun run build:local                                   # -> dist/ccc-morph
 CCC_MORPH_BIN="$PWD/dist/ccc-morph" test/e2e/run.sh
 ```
 
-Docker (mirrors CI):
+Docker (matches CI):
 
 ```sh
 docker build --target export -o type=local,dest=./out .   # -> out/linux-x64/ccc-morph
@@ -40,6 +40,5 @@ docker build -f test/e2e/Dockerfile -t ccc-morph-e2e test/e2e
 docker run --rm -v "$PWD/e2e-out:/e2e/out" ccc-morph-e2e
 ```
 
-CI integration is host-specific. The source repository runs these commands from its
-build workflow on pushes to master (and on demand); public mirrors should provide an
-equivalent job for their hosting platform.
+CI integration is host-specific. Wire these commands into a build workflow (for example,
+on pushes to `master` and on demand), adapting the job to your CI platform.

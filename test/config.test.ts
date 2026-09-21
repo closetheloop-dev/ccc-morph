@@ -9,6 +9,7 @@ import {
   parseAppConfigText,
   parseConfigText,
 } from "../src/config";
+import { chordCanon } from "../src/keys";
 
 const valid = `version = 1
 sequence_timeout_ms = 125
@@ -62,7 +63,7 @@ describe("configuration", () => {
     expect(config.startNoticeTimeoutMs).toBe(333);
     expect(config.notesChildMode).toBe("pause");
     expect(config.bindings).toHaveLength(3);
-    expect(Array.from(compileBindings(config)[0]!.pattern)).toEqual([4, 4]);
+    expect(chordCanon(compileBindings(config)[0]!.chord)).toBe("ctrl+d ctrl+d");
   });
 
   test("uses transparent defaults", () => {
@@ -82,7 +83,7 @@ describe("configuration", () => {
       ["ctrl-b", "r"],
       ["ctrl-b", "l"],
       ["ctrl-b", "n"],
-      ["ctrl-b", "p"],
+      ["ctrl-b", "a"],
     ]);
   });
 
@@ -92,6 +93,15 @@ describe("configuration", () => {
     expect(app.sequenceTimeoutMs).toBe(1000);
     expect(app.notesChildMode).toBe("continue");
     expect(app.aliases).toEqual(["codex-cli"]);
+    expect(app.bindings.map((binding) => binding.action.type)).toEqual(["ignore", "send"]);
+  });
+
+  test("keeps the shipped opencode app config valid", () => {
+    const text = readFileSync(resolve(import.meta.dir, "../apps/opencode.toml"), "utf8");
+    const app = parseAppConfigText(text, "apps/opencode.toml");
+    expect(app.sequenceTimeoutMs).toBe(1000);
+    expect(app.notesChildMode).toBe("continue");
+    expect(app.aliases).toEqual([]);
     expect(app.bindings.map((binding) => binding.action.type)).toEqual(["ignore", "send"]);
   });
 
@@ -109,7 +119,7 @@ describe("configuration", () => {
           .map((binding) => binding.keys),
       ).toEqual([
         ["ctrl-b", "n"],
-        ["ctrl-b", "p"],
+        ["ctrl-b", "a"],
       ]);
     });
   });
@@ -241,21 +251,60 @@ action = { type = "quit" }
     expect(resolved.bindings).toEqual([]);
   });
 
-  test("overrides by terminal encoding rather than spelling", () => {
+  test("overrides by key chord rather than spelling", () => {
+    // ctrl-2 and ctrl-space share the legacy 0x00 encoding (accept identity
+    // ctrl+space), so the app binding overlaps and overrides the inherited one
+    // rather than adding a second binding that collides at runtime.
     const global = `version = 1
 [[bindings]]
-keys = ["alt-x"]
+keys = ["ctrl-space"]
 action = { type = "quit" }
 `;
     const demo = `version = 1
 [[bindings]]
-keys = ["escape", "x"]
+keys = ["ctrl-2"]
 action = { type = "show-errors" }
 `;
     withConfig(global, { demo }, (configPath) => {
       const resolved = loadResolvedConfig(configPath, false, ["demo"], null);
       expect(resolved.bindings).toHaveLength(1);
       expect(resolved.bindings[0]!.action).toEqual({ type: "show-errors" });
+    });
+  });
+
+  test("a named app binding overrides an inherited raw (hex) binding of the same keys", () => {
+    // hex:026e == Ctrl-B, n. The named app binding overlaps it, so it replaces the
+    // inherited raw binding rather than both surviving into an ambiguous config.
+    const global = `version = 1
+[[bindings]]
+keys = ["hex:026e"]
+action = { type = "quit" }
+`;
+    const demo = `version = 1
+[[bindings]]
+keys = ["ctrl-b", "n"]
+action = { type = "show-notes" }
+`;
+    withConfig(global, { demo }, (configPath) => {
+      const resolved = loadResolvedConfig(configPath, false, ["demo"], null);
+      expect(resolved.bindings).toHaveLength(1);
+      expect(resolved.bindings[0]!.action).toEqual({ type: "show-notes" });
+    });
+  });
+
+  test("a named app unbind removes an inherited raw (hex) binding of the same keys", () => {
+    const global = `version = 1
+[[bindings]]
+keys = ["hex:026e"]
+action = { type = "quit" }
+`;
+    const demo = `version = 1
+[[unbind]]
+keys = ["ctrl-b", "n"]
+`;
+    withConfig(global, { demo }, (configPath) => {
+      const resolved = loadResolvedConfig(configPath, false, ["demo"], null);
+      expect(resolved.bindings).toHaveLength(0);
     });
   });
 
@@ -352,17 +401,19 @@ action = { type = "ignore" }
     });
   });
 
-  test("rejects duplicate encodings within one binding set", () => {
+  test("rejects overlapping key chords within one binding set", () => {
+    // ctrl-2 and ctrl-space overlap on the legacy ctrl+space identity, so binding
+    // both is ambiguous.
     expect(() =>
       parseConfigText(`version = 1
 [[bindings]]
-keys = ["alt-x"]
+keys = ["ctrl-space"]
 action = { type = "quit" }
 [[bindings]]
-keys = ["escape", "x"]
+keys = ["ctrl-2"]
 action = { type = "quit" }
 `),
-    ).toThrow("same terminal encoding");
+    ).toThrow("resolves to the same key chord");
   });
 
   test("validates send actions before starting a child", () => {

@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { bytesKey, encodeKeys, encodeRawHex } from "./keys";
+import { chordsOverlap, compileChord, encodeKeys, encodeRawHex } from "./keys";
 import type {
   Action,
   AppConfig,
@@ -152,22 +152,21 @@ function validateProgramName(value: string, context: string): void {
   }
 }
 
-function bindingKey(binding: Binding): string {
-  return bytesKey(encodeKeys(binding.keys));
-}
-
+// Reject bindings that could both fire on the same input. This is broader than
+// canonical equality: two chords whose identities differ (hex:026e vs ctrl-b,n) can
+// still match the same keystrokes, and binding both would be ambiguous.
 function assertUniqueBindings(bindings: Binding[], context: string): void {
-  const seen = new Map<string, string>();
+  const seen: { label: string; chord: ReturnType<typeof compileChord> }[] = [];
   for (const binding of bindings) {
-    const encoded = bindingKey(binding);
     const label = binding.keys.join(" ");
-    const previous = seen.get(encoded);
-    if (previous !== undefined) {
+    const chord = compileChord(binding.keys);
+    const clash = seen.find((entry) => chordsOverlap(entry.chord, chord));
+    if (clash !== undefined) {
       throw new Error(
-        `${context} binding ${JSON.stringify(label)} has the same terminal encoding as ${JSON.stringify(previous)}`,
+        `${context} binding ${JSON.stringify(label)} resolves to the same key chord as ${JSON.stringify(clash.label)}`,
       );
     }
-    seen.set(encoded, label);
+    seen.push({ label, chord });
   }
 }
 
@@ -298,12 +297,21 @@ export function applyAppConfig(
   app: AppConfig,
   appName: string,
 ): ResolvedConfig {
-  const merged = new Map<string, Binding>();
-  if (app.inheritGlobals) {
-    for (const binding of config.bindings) merged.set(bindingKey(binding), binding);
+  // Resolve overrides and unbinds by the SAME overlap relation duplicate detection
+  // uses, so a raw (hex:) inherited binding and its named app equivalent are treated
+  // as the same key: the app binding replaces it and a named unbind removes it,
+  // rather than both surviving into an ambiguous resolved configuration.
+  const merged: Binding[] = app.inheritGlobals ? [...config.bindings] : [];
+  const removeOverlapping = (chord: ReturnType<typeof compileChord>): void => {
+    for (let index = merged.length - 1; index >= 0; index -= 1) {
+      if (chordsOverlap(compileChord(merged[index]!.keys), chord)) merged.splice(index, 1);
+    }
+  };
+  for (const keys of app.unbind) removeOverlapping(compileChord(keys));
+  for (const binding of app.bindings) {
+    removeOverlapping(compileChord(binding.keys));
+    merged.push(binding);
   }
-  for (const keys of app.unbind) merged.delete(bytesKey(encodeKeys(keys)));
-  for (const binding of app.bindings) merged.set(bindingKey(binding), binding);
 
   return {
     version: 1,
@@ -313,7 +321,7 @@ export function applyAppConfig(
     completionNoticeTimeoutMs: app.completionNoticeTimeoutMs ?? config.completionNoticeTimeoutMs,
     startNoticeTimeoutMs: app.startNoticeTimeoutMs ?? config.startNoticeTimeoutMs,
     notesChildMode: app.notesChildMode ?? config.notesChildMode,
-    bindings: Array.from(merged.values()),
+    bindings: merged,
     appName,
   };
 }
@@ -352,7 +360,7 @@ export function compileBindings(config: SessionConfig): CompiledBinding[] {
     ...binding,
     id: `binding-${index}`,
     label: binding.keys.join(" "),
-    pattern: encodeKeys(binding.keys),
+    chord: compileChord(binding.keys),
   }));
 }
 

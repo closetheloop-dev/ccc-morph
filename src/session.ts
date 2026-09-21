@@ -5,7 +5,8 @@ import { BackgroundActions } from "./background-actions";
 import { ChildWriter } from "./child-writer";
 import { compileBindings } from "./config";
 import { ErrorViewer } from "./error-viewer";
-import { encodeKeys, encodeRawHex } from "./keys";
+import { encodeKeysActive, encodeRawHex, type InputToken, type Key } from "./keys";
+import { KeyboardModeStack, type ScreenModes } from "./kitty";
 import { InputRouter, ShortcutMatcher } from "./matcher";
 import { NoteStore, type WorkspaceNote } from "./note-store";
 import { NoteViewer } from "./note-viewer";
@@ -100,8 +101,8 @@ function formatDuration(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
-function sendPayload(action: SendAction): Uint8Array {
-  if (action.keys) return encodeKeys(action.keys);
+function sendPayload(action: SendAction, flags: number): Uint8Array {
+  if (action.keys) return encodeKeysActive(action.keys, flags);
   if (action.text !== undefined) return encoder.encode(action.text);
   return encodeRawHex(action.bytes!);
 }
@@ -116,9 +117,13 @@ export class TerminalSession {
   readonly #notes: NoteViewer;
   readonly #outputs: OutputViewer;
   readonly #capture: OutputCapture;
+  // Tracks the Kitty keyboard mode the child has negotiated (observed from its output),
+  // so `send` re-encodes keys in that mode and the matcher's decode stays consistent.
+  readonly #keyboard = new KeyboardModeStack();
   #child: Bun.Subprocess | null = null;
   #terminal: Bun.Terminal | null = null;
   #router: InputRouter | null = null;
+  #matcher: ShortcutMatcher | null = null;
   #savedTerminalState: string | null = null;
   // Buffers writes to the child and makes full delivery observable (see #submitNotes).
   #writer: ChildWriter | null = null;
@@ -129,15 +134,60 @@ export class TerminalSession {
   #reassertTimer: ReturnType<typeof setTimeout> | null = null;
   #failureNotice: { head: string; body: string; tail: string } | null = null;
   #editorActive = false;
+  // Set once a replay-log overflow starts shutdown, so the PTY callback stops processing and
+  // the shutdown is idempotent; #overflowExitCode is returned through run().
+  #aborting = false;
+  #overflowExitCode: number | null = null;
   #notesModalPaused = false;
   #modalTask: Promise<void> | null = null;
+  // The child's keyboard-mode state captured when a modal began suppressing output,
+  // so the terminal can be reconciled to the child's current mode when the modal
+  // closes (the terminal missed any mode changes made behind the modal). It is also
+  // the state the terminal is actually left in, so cleanup resets from it.
+  #modeStackAtModalOpen: ScreenModes | null = null;
 
+  // All terminal input flows through the one router so it is decoded exactly once
+  // (legacy bytes and Kitty CSI-u alike); the router's sink then dispatches decoded
+  // keys to the active wrapper viewer or to the shortcut matcher (see #routeKeys).
   readonly #onInput = (chunk: Buffer): void => {
-    if (this.#outputs.active) this.#outputs.handleInput(chunk);
-    else if (this.#notes.active) this.#notes.handleInput(chunk);
-    else if (this.#viewer.active) this.#viewer.handleInput(chunk);
-    else this.#router?.feed(chunk);
+    this.#router?.feed(chunk);
   };
+
+  // Route decoded input. Release and repeat events always go to the matcher so its
+  // per-key release bookkeeping stays correct across modal transitions (a press that
+  // opened a modal still gets its owed release settled). While a modal owns the
+  // screen, a decoded press drives that viewer instead of the matcher — and we tell
+  // the matcher to owe that key's release, so the release (which may arrive after the
+  // modal closes) is swallowed rather than leaked to the child as an orphan.
+  #routeKeys(tokens: InputToken[]): void {
+    for (const token of tokens) {
+      if (token.kind === "key" && token.event === "press" && this.#modalActive()) {
+        this.#dispatchViewerKey(token.key);
+        this.#matcher?.oweRelease(token.key);
+      } else if (token.kind !== "key" && this.#modalActive()) {
+        // Non-key input (mouse, unknown escapes) has no meaning to a viewer; drop it.
+      } else {
+        this.#matcher?.feedKeys([token]);
+      }
+    }
+  }
+
+  #dispatchViewerKey(key: Key): void {
+    if (this.#outputs.active) this.#outputs.handleKey(key);
+    else if (this.#notes.active) this.#notes.handleKey(key);
+    else if (this.#viewer.active) this.#viewer.handleKey(key);
+  }
+
+  // The Kitty flags the OUTER TERMINAL is currently encoding input with. Non-modal
+  // this is the child's live mode; while a modal suppresses output the terminal is
+  // frozen at the modal-open snapshot, so its flags come from there — not the child's
+  // hidden observed mode, which the terminal has not been told about yet.
+  #exposedFlags(): number {
+    const snapshot = this.#modeStackAtModalOpen;
+    if (snapshot === null) return this.#keyboard.current();
+    const stack = snapshot.active === "alt" ? snapshot.alt : snapshot.main;
+    return stack.length > 0 ? stack[stack.length - 1]! : 0;
+  }
 
   readonly #onResize = (): void => {
     const cols = process.stdout.columns ?? 80;
@@ -220,7 +270,18 @@ export class TerminalSession {
       (bytes) => this.#writeChild(bytes),
       (binding) => this.#handleBinding(binding),
     );
-    this.#router = new InputRouter(matcher, (bytes) => this.#writeChild(bytes));
+    this.#matcher = matcher;
+    this.#router = new InputRouter({
+      keys: (tokens) => this.#routeKeys(tokens),
+      // Bracketed-paste content goes straight to the child, and never into a modal.
+      paste: (bytes) => {
+        if (!this.#modalActive()) this.#writeChild(bytes);
+      },
+      beforePaste: () => {
+        if (!this.#modalActive()) matcher.flushPending();
+      },
+      dispose: () => matcher.dispose(),
+    });
 
     try {
       this.#prepareOuterTerminal();
@@ -232,11 +293,32 @@ export class TerminalSession {
           rows,
           name: environment.TERM ?? "xterm-256color",
           data: (_terminal, data) => {
+            // Once an overflow shutdown is underway, stop processing PTY output entirely: the
+            // async shutdown owns the terminal from here and will reset and exit.
+            if (this.#aborting) return;
             // Capture every byte (even while a modal owns the screen) so `c` can
-            // pull the program's recent output on demand.
+            // pull the program's recent output on demand, and track the Kitty
+            // keyboard mode the child negotiates (a pure observer of the stream).
             this.#capture.feed(data);
-            if (this.#modalActive()) return;
-            process.stdout.write(data);
+            // The observer both tracks the child's mode and returns the bytes to write:
+            // it suppresses output behind a modal, and holds an incomplete trailing
+            // control until it completes so a control is only ever written whole (its
+            // exact byte order preserved). The modal-close replay is emitted separately.
+            const output = this.#keyboard.feed(data);
+            // The matcher must use the flags the TERMINAL is actually encoding input
+            // with (release bookkeeping, app-cursor matching), which during a modal is
+            // the frozen snapshot, not the child's hidden observed mode.
+            this.#matcher?.setFlags(this.#exposedFlags());
+            if (output.length > 0) process.stdout.write(output);
+            if (this.#modalActive()) {
+              // Safety valve: a program flooding mode/screen controls behind a modal would
+              // grow the replay log without bound. At the limit, begin a cross-platform safe
+              // shutdown -- reap the child and any editor, reset the outer terminal from the
+              // exposed snapshot, and terminate -- rather than grow the heap or continue with
+              // divergent state.
+              if (this.#keyboard.recordingOverflowed()) this.#beginOverflowShutdown();
+              return;
+            }
             // First output after the viewer closed: the child has reacted to
             // the shrunken PTY, so the real size can be restored shortly.
             if (this.#pendingRestore !== null) this.#scheduleRestore(REDRAW_ACK_MS);
@@ -261,9 +343,10 @@ export class TerminalSession {
       // task, so #submitNotes stops waiting to drain (and keeps its notes) instead of hanging.
       this.#writer?.close();
       if (this.#modalTask !== null) await this.#modalTask;
-      return exitCode;
+      // A replay-log overflow shuts the session down through this normal unwind, returning 1.
+      return this.#overflowExitCode ?? exitCode;
     } finally {
-      this.#cleanup();
+      this.#cleanup(this.#aborting);
     }
   }
 
@@ -297,7 +380,7 @@ export class TerminalSession {
     const action = binding.action;
     if (action.type === "ignore") return;
     if (action.type === "send") {
-      this.#writeChild(sendPayload(action));
+      this.#writeChild(sendPayload(action, this.#keyboard.current()));
       return;
     }
     if (action.type === "run") {
@@ -309,7 +392,12 @@ export class TerminalSession {
       return;
     }
     if (action.type === "show-errors") {
+      const wasModal = this.#modalActive();
       if (this.#viewer.open()) {
+        if (!wasModal) {
+          this.#modeStackAtModalOpen = this.#keyboard.snapshot();
+          this.#keyboard.startRecording();
+        }
         // The errors are seen now: stop re-asserting the failure notice.
         this.#failureNotice = null;
         if (this.#reassertTimer !== null) {
@@ -454,6 +542,24 @@ export class TerminalSession {
   }
 
   #redrawChild(resume: boolean): void {
+    // During an overflow shutdown the modal task may unwind (e.g. the editor was reaped) and
+    // reach here, but the terminal must NOT be reconciled from the truncated recording or the
+    // diverged observer state: the shutdown resets from the preserved modal-opening snapshot
+    // instead. Skip entirely, leaving that snapshot intact for #cleanup.
+    if (this.#aborting) return;
+    // The modal is closing: the terminal missed the mode/screen controls the child
+    // emitted while its output was suppressed. Replay exactly those controls (not the
+    // suppressed visible output) so the terminal reproduces the child's current mode
+    // and screen state faithfully, in order.
+    const snapshot = this.#modeStackAtModalOpen;
+    this.#modeStackAtModalOpen = null;
+    if (snapshot !== null) {
+      const replay = this.#keyboard.stopRecording();
+      if (replay.length > 0) process.stdout.write(replay);
+      // The terminal now exposes the child's mode again: switch the matcher's flags
+      // atomically from the frozen snapshot to the reconciled child state.
+      this.#matcher?.setFlags(this.#exposedFlags());
+    }
     const terminal = this.#terminal;
     if (!terminal || terminal.closed) {
       if (resume) this.#signalChildGroup("SIGCONT");
@@ -534,6 +640,8 @@ export class TerminalSession {
 
   #beginNotesModal(): boolean {
     if (this.#modalActive()) return false;
+    this.#modeStackAtModalOpen = this.#keyboard.snapshot();
+    this.#keyboard.startRecording();
     this.#notesModalPaused = this.#config.notesChildMode === "pause";
     if (this.#notesModalPaused) this.#signalChildGroup("SIGSTOP");
     return true;
@@ -765,13 +873,37 @@ export class TerminalSession {
     }
   }
 
-  #cleanup(): void {
+  // Safe shutdown for a replay-log overflow (see the data callback and kitty.ts). Idempotent.
+  // It stops accepting PTY output (#aborting), discards the truncated log, and kills the flood
+  // SOURCE -- the wrapped child group -- but deliberately does NOT touch an external editor:
+  // the editor inherits the real terminal directly, so force-killing it would skip its own
+  // teardown (leaving the shell on the editor's alternate screen or in editor-set keyboard/
+  // mouse/paste modes the wrapped-child observer never saw). The editor is left to exit
+  // normally/user-driven; run()'s `await modalTask` awaits that exit (its finally removes its
+  // temp dir and restores the tty), after which #cleanup resets the outer terminal from the
+  // preserved modal-opening snapshot and run() returns exit status 1. Killing the child both
+  // stops the flood and resolves run()'s `await child.exited`. Cross-platform and
+  // ownership-free: it never infers whether the child was independently stopped.
+  #beginOverflowShutdown(): void {
+    if (this.#aborting) return;
+    this.#aborting = true;
+    this.#overflowExitCode = 1;
+    this.#keyboard.discardRecording(); // drop the truncated log; we reset from the snapshot
+    try {
+      this.#signalChildGroup("SIGKILL");
+    } catch {
+      // The child may have already exited.
+    }
+  }
+
+  #cleanup(overflow = false): void {
     if (this.#cleaned) return;
     this.#cleaned = true;
     this.#background.shutdown();
     this.#writer?.close();
     this.#router?.dispose();
     this.#router = null;
+    this.#matcher = null;
     if (this.#redrawTimer !== null) {
       clearTimeout(this.#redrawTimer);
       this.#redrawTimer = null;
@@ -794,7 +926,43 @@ export class TerminalSession {
     if (this.#outputs.active) this.#outputs.deactivate();
     if (this.#notes.active) this.#notes.deactivate();
     this.#notesModalPaused = false;
-    if (this.#viewer.active) this.#viewer.close();
+    // On overflow, deactivate the error viewer PASSIVELY: its close() would run the resume
+    // callback -> #redrawChild, which clears the modal snapshot, replays the retained
+    // (truncated) prefix, and reconciles from the observer's post-overflow state. The
+    // overflow path instead resets from the preserved modal-opening snapshot below, so it
+    // must not fire that callback.
+    if (this.#viewer.active) {
+      if (overflow) this.#viewer.deactivate();
+      else this.#viewer.close();
+    }
+    // Safety net: return the outer terminal to legacy encoding so the user's shell is
+    // not left enhanced. Reset from the state the terminal was actually LEFT IN — a
+    // modal snapshot if one is still open (the terminal froze there while suppressed),
+    // otherwise the child's live observed state — not merely the child's latest mode,
+    // which may have popped behind a modal without the terminal ever seeing it.
+    const exposed = this.#modeStackAtModalOpen ?? this.#keyboard.snapshot();
+    // Drop any recording still open behind a modal; the reset below returns the terminal
+    // to legacy directly, so the captured log is not replayed.
+    this.#keyboard.discardRecording();
+    const reset = this.#keyboard.resetSequence(exposed);
+    if (reset.length > 0) {
+      try {
+        process.stdout.write(reset);
+      } catch {
+        // stdout may already be gone during a hard shutdown.
+      }
+    }
+    // Tell the user why the session ended, AFTER the terminal is reset (and, for an editor
+    // overflow, after the editor has been reaped and could no longer overwrite this).
+    if (overflow) {
+      try {
+        process.stdout.write(
+          "[ccc-morph] terminated: the wrapped program emitted an excessive burst of terminal mode controls.\r\n",
+        );
+      } catch {
+        // stdout may already be gone.
+      }
+    }
     try {
       this.#terminal?.close();
     } catch {

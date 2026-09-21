@@ -31,7 +31,7 @@ done
 # Every release archive ships the bundled app configs (codex, claude, ...). install.sh
 # globs apps/*.toml, so anything copied in here reaches users; require the known ones so a
 # missing config fails the build rather than silently shipping a partial set.
-for app_config in apps/codex.toml apps/claude.toml; do
+for app_config in apps/codex.toml apps/claude.toml apps/opencode.toml; do
   if [[ ! -f "$app_config" ]]; then
     echo "error: $app_config missing — required in every release archive" >&2
     exit 1

@@ -1,3 +1,5 @@
+import type { ChordElement } from "./keys";
+
 export type SendAction = {
   type: "send";
   keys?: string[];
@@ -71,7 +73,11 @@ export type ResolvedConfig = SessionConfig & {
 export type CompiledBinding = Binding & {
   id: string;
   label: string;
-  pattern: Uint8Array;
+  // The compiled chord: one element per keystroke, each an accept-set of key ids or
+  // an exact byte sequence. This is the single identity the matcher, duplicate
+  // detection, merging, and unbinding all use, so a binding fires whether the
+  // terminal sent legacy bytes or Kitty CSI-u for those keys.
+  chord: readonly ChordElement[];
 };
 
 export type ActionError = {

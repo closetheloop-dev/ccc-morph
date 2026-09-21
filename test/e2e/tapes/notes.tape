@@ -23,6 +23,6 @@ Wait+Screen /ccc-morph notes \[active\]/
 Type "a"
 Wait+Screen /e2e note alpha/
 Wait+Screen /note saved/
-Wait+Screen /a add note/
+Wait+Screen /a add/
 Type "q"
 Wait+Screen /SIZE:/

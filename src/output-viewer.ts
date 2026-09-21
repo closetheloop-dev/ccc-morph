@@ -1,5 +1,6 @@
+import type { Key } from "./keys";
 import type { TranscriptMessage } from "./output-capture";
-import { ViewerInput, type ViewerInputToken } from "./viewer-input";
+import { keyToViewerToken, type ViewerInputToken } from "./viewer-input";
 
 type OutputViewerControls = {
   // Called with the chosen response's text; the caller opens the note editor on it.
@@ -34,7 +35,6 @@ function clip(value: string, width: number): string {
 // capture into a note.
 export class OutputViewer {
   readonly #controls: OutputViewerControls;
-  readonly #input: ViewerInput;
   #active = false;
   #messages: TranscriptMessage[] = [];
   #index = 0;
@@ -43,7 +43,6 @@ export class OutputViewer {
 
   constructor(controls: OutputViewerControls) {
     this.#controls = controls;
-    this.#input = new ViewerInput((token) => this.#handleToken(token));
   }
 
   get active(): boolean {
@@ -55,20 +54,17 @@ export class OutputViewer {
     this.#active = true;
     this.#index = 0;
     this.#previewScroll = 0;
-    this.#input.reset();
     this.render();
   }
 
   // Tear down without returning to the hub; used during session cleanup.
   deactivate(): void {
     this.#active = false;
-    this.#input.reset();
   }
 
   close(): void {
     if (!this.#active) return;
     this.#active = false;
-    this.#input.reset();
     process.stdout.write("\x1b[0m\x1b[2J\x1b[H");
     this.#controls.close();
   }
@@ -77,9 +73,10 @@ export class OutputViewer {
     if (this.#active) this.render();
   }
 
-  handleInput(bytes: Uint8Array): void {
+  handleKey(key: Key): void {
     if (this.#busy) return;
-    this.#input.feed(bytes);
+    const token = keyToViewerToken(key);
+    if (token !== null) this.#handleToken(token);
   }
 
   #handleToken(token: ViewerInputToken): void {

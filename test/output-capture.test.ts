@@ -409,6 +409,14 @@ describe("output capture", () => {
         `${JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } })}\n`;
       writeFileSync(join(dir, "older.jsonl"), line("older reply"));
       writeFileSync(join(dir, "newest.jsonl"), line("newest reply"));
+      // Pin distinct pre-launch mtimes so "newest" is unambiguous regardless of the
+      // filesystem's timestamp granularity: two back-to-back writes can otherwise land on
+      // the same mtime (seen on the container filesystem), leaving the newest-first sort to
+      // the arbitrary directory-read order.
+      const older = new Date(Date.now() - 60_000);
+      const newer = new Date(Date.now() - 30_000);
+      utimesSync(join(dir, "older.jsonl"), older, older);
+      utimesSync(join(dir, "newest.jsonl"), newer, newer);
       // --continue (resume-latest) reuses the newest pre-launch transcript.
       const cont = new OutputCapture({ commandName: "claude", cwd, home, resumeLatest: true });
       cont.feed(enc("raw buffer"));

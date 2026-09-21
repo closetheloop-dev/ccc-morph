@@ -66,7 +66,7 @@ Prefer to do it by hand, or need to verify before installing? Download the asset
    ```
 
 `install.sh` copies the binary to `~/.local/bin` (override with `INSTALL_DIR=...`),
-installs the bundled app configs (Codex and Claude) to `~/.config/ccc-morph/apps/`, and runs
+installs the bundled app configs (Codex, Claude, and opencode) to `~/.config/ccc-morph/apps/`, and runs
 `ccc-morph --ensure-defaults` to create or top up the global
 `~/.config/ccc-morph/config.toml` with two default bindings: `Ctrl-B E` (error viewer)
 and `Ctrl-B N` (the notes hub). Open the hub to view your notes; inside it, `a` adds a
@@ -154,6 +154,14 @@ ccc-morph launches the wrapped command on a real pseudoterminal and passes its d
 and input through unchanged, intercepting only the key sequences you configure. The
 child inherits the working directory, environment, `TERM`, and terminal dimensions, and
 its output is never decoded or re-rendered during normal operation.
+
+Modern terminals that implement the Kitty keyboard protocol (Ghostty, Foot, kitty, WezTerm,
+recent GNOME/VTE) let a program report keys as escape sequences instead of legacy bytes.
+ccc-morph follows that negotiation: it decodes those sequences so your bindings still match,
+and re-encodes any keys it sends in the mode the program is using. That is what makes a guard
+like double-`Ctrl-D` work in a desktop terminal, not only over SSH. See
+[Configuration](docs/configuration.md#modern-terminals-kitty-keyboard-protocol) for how this
+affects key names.
 
 Shortcut interception needs a terminal on both stdin and stdout. When either is
 redirected (a pipe, a file, a non-interactive shell), there is no PTY to intercept, so

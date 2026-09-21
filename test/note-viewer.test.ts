@@ -2,10 +2,32 @@ import { afterAll, afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { decodeLegacyKey, type Key } from "../src/keys";
 import { NoteStore, type WorkspaceNote } from "../src/note-store";
 import { NoteViewer } from "../src/note-viewer";
 
 const stdout = spyOn(process.stdout, "write").mockImplementation(() => true);
+
+// The shared input pipeline decodes terminal bytes into keys once, before a viewer
+// sees them; these tests mirror that by decoding a self-contained byte sequence and
+// dispatching each resulting key press to the viewer.
+function type(viewer: { handleKey(key: Key): void }, ...bytes: number[]): void {
+  const buf = Uint8Array.from(bytes);
+  let offset = 0;
+  while (offset < buf.length) {
+    const result = decodeLegacyKey(buf.subarray(offset));
+    if (result === null) {
+      if (buf.length - offset === 1 && buf[offset] === 0x1b) {
+        viewer.handleKey({ name: "escape", mods: { ctrl: false, alt: false, shift: false } });
+      }
+      break;
+    }
+    if (result.token.kind === "key" && result.token.event === "press") {
+      viewer.handleKey(result.token.key);
+    }
+    offset += result.consumed;
+  }
+}
 
 afterEach(() => {
   stdout.mockClear();
@@ -38,10 +60,10 @@ describe("note viewer", () => {
       });
 
       viewer.open();
-      viewer.handleInput(Uint8Array.of(0x20)); // Select newest ("second").
-      viewer.handleInput(Uint8Array.of(0x1b, 0x5b, 0x42)); // Down arrow to older ("first").
-      viewer.handleInput(Uint8Array.of(0x20));
-      viewer.handleInput(Uint8Array.of(0x0d));
+      type(viewer, 0x20); // Select newest ("second").
+      type(viewer, 0x1b, 0x5b, 0x42); // Down arrow to older ("first").
+      type(viewer, 0x20);
+      type(viewer, 0x0d);
       await Bun.sleep(5);
 
       expect(submitted.map((note) => note.id)).toEqual([first.id, second.id]);
@@ -59,14 +81,14 @@ describe("note viewer", () => {
       const viewer = new NoteViewer(store, { close: () => {}, submit: async () => {} });
 
       viewer.open();
-      viewer.handleInput(Uint8Array.of(0x09)); // Archive tab.
-      viewer.handleInput(Uint8Array.of(0x72)); // Restore.
+      type(viewer, 0x09); // Archive tab.
+      type(viewer, 0x72); // Restore.
       await Bun.sleep(10);
       expect(store.load()[0]!.archivedAt).toBeNull();
 
-      viewer.handleInput(Uint8Array.of(0x09)); // Active tab.
-      viewer.handleInput(Uint8Array.of(0x44)); // D: ask to delete.
-      viewer.handleInput(Uint8Array.of(0x79)); // Confirm.
+      type(viewer, 0x09); // Active tab.
+      type(viewer, 0x44); // D: ask to delete.
+      type(viewer, 0x79); // Confirm.
       await Bun.sleep(10);
       expect(store.load()).toEqual([]);
     } finally {
@@ -86,7 +108,7 @@ describe("note viewer", () => {
         },
       });
       viewer.open();
-      viewer.handleInput(Uint8Array.of(0x0d));
+      type(viewer, 0x0d);
       await Bun.sleep(5);
       expect(submissions).toBe(0);
       expect(viewer.active).toBe(true);
@@ -95,7 +117,7 @@ describe("note viewer", () => {
     }
   });
 
-  test("moves with arrow sequences split across input chunks", async () => {
+  test("moves with a decoded down-arrow key", async () => {
     const { root, store } = fixture();
     try {
       const first = await store.add("first");
@@ -110,11 +132,9 @@ describe("note viewer", () => {
       });
 
       viewer.open();
-      viewer.handleInput(Uint8Array.of(0x1b));
-      viewer.handleInput(Uint8Array.of(0x5b));
-      viewer.handleInput(Uint8Array.of(0x42)); // Down to the older note.
-      viewer.handleInput(Uint8Array.of(0x20));
-      viewer.handleInput(Uint8Array.of(0x0d));
+      type(viewer, 0x1b, 0x5b, 0x42); // Down to the older note.
+      type(viewer, 0x20);
+      type(viewer, 0x0d);
       await Bun.sleep(5);
 
       expect(submitted.map((note) => note.id)).toEqual([first.id]);
@@ -130,8 +150,8 @@ describe("note viewer", () => {
       const note = await store.add("keep me");
       const viewer = new NoteViewer(store, { close: () => {}, submit: async () => {} });
       viewer.open();
-      viewer.handleInput(Uint8Array.of(0x44)); // D: ask to delete
-      viewer.handleInput(Uint8Array.of(0x6e)); // n: anything but y cancels
+      type(viewer, 0x44); // D: ask to delete
+      type(viewer, 0x6e); // n: anything but y cancels
       await Bun.sleep(10);
       expect(store.load().map((n) => n.id)).toEqual([note.id]);
       expect(viewer.active).toBe(true);
@@ -152,9 +172,9 @@ describe("note viewer", () => {
         },
       });
       viewer.open();
-      viewer.handleInput(Uint8Array.of(0x20)); // select
-      viewer.handleInput(Uint8Array.of(0x20)); // deselect
-      viewer.handleInput(Uint8Array.of(0x0d)); // Enter
+      type(viewer, 0x20); // select
+      type(viewer, 0x20); // deselect
+      type(viewer, 0x0d); // Enter
       await Bun.sleep(5);
       expect(submissions).toBe(0);
       expect(viewer.active).toBe(true);
@@ -178,8 +198,8 @@ describe("note viewer", () => {
         },
       });
       viewer.open();
-      viewer.handleInput(Uint8Array.of(0x20)); // select something first
-      viewer.handleInput(Uint8Array.of(0x71)); // q
+      type(viewer, 0x20); // select something first
+      type(viewer, 0x71); // q
       await Bun.sleep(5);
       expect(closed).toBe(1);
       expect(submissions).toBe(0);
@@ -203,10 +223,10 @@ describe("note viewer", () => {
         },
       });
       viewer.open(); // newest-first: cursor on "second"
-      viewer.handleInput(Uint8Array.of(0x1b, 0x5b, 0x42)); // Down to "first"
-      viewer.handleInput(Uint8Array.of(0x1b, 0x5b, 0x41)); // Up back to "second"
-      viewer.handleInput(Uint8Array.of(0x20)); // select current
-      viewer.handleInput(Uint8Array.of(0x0d));
+      type(viewer, 0x1b, 0x5b, 0x42); // Down to "first"
+      type(viewer, 0x1b, 0x5b, 0x41); // Up back to "second"
+      type(viewer, 0x20); // select current
+      type(viewer, 0x0d);
       await Bun.sleep(5);
       expect(submitted.map((n) => n.id)).toEqual([second.id]);
     } finally {
@@ -228,13 +248,13 @@ describe("note viewer", () => {
       expect(before).toContain("L00"); // top of the note is visible
       expect(before).not.toContain("L39"); // last line is below the fold
 
-      viewer.handleInput(Uint8Array.of(0x66)); // f: page down
-      viewer.handleInput(Uint8Array.of(0x66));
-      viewer.handleInput(Uint8Array.of(0x66));
-      viewer.handleInput(Uint8Array.of(0x66));
+      type(viewer, 0x66); // f: page down
+      type(viewer, 0x66);
+      type(viewer, 0x66);
+      type(viewer, 0x66);
       const after = String(stdout.mock.calls.at(-1)?.[0] ?? "");
       expect(after).toContain("L39"); // scrolled the preview to the end
-      viewer.handleInput(Uint8Array.of(0x75)); // u: half page up moves back off the end
+      type(viewer, 0x75); // u: half page up moves back off the end
       expect(String(stdout.mock.calls.at(-1)?.[0] ?? "")).not.toContain("L39");
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -251,9 +271,9 @@ describe("note viewer", () => {
       const viewer = new NoteViewer(store, { close: () => {}, submit: async () => {} });
 
       viewer.open();
-      viewer.handleInput(Uint8Array.of(0x47)); // G: jump to the bottom
+      type(viewer, 0x47); // G: jump to the bottom
       expect(String(stdout.mock.calls.at(-1)?.[0] ?? "")).toContain("L39");
-      viewer.handleInput(Uint8Array.of(0x67)); // g: jump back to the top
+      type(viewer, 0x67); // g: jump back to the top
       const top = String(stdout.mock.calls.at(-1)?.[0] ?? "");
       expect(top).toContain("L00");
       expect(top).not.toContain("L39");
@@ -277,7 +297,7 @@ describe("note viewer", () => {
       });
 
       viewer.open();
-      viewer.handleInput(Uint8Array.of(0x65)); // e
+      type(viewer, 0x65); // e
       await Bun.sleep(5);
       expect(editedId).toBe(note.id);
       expect(store.load()[0]!.text).toBe("rewritten");
@@ -303,7 +323,7 @@ describe("note viewer", () => {
       });
 
       ref.viewer.open();
-      ref.viewer.handleInput(Uint8Array.of(0x61)); // a: add
+      type(ref.viewer, 0x61); // a: add
       await Bun.sleep(5);
 
       expect(added).toBe(1);
@@ -334,7 +354,7 @@ describe("note viewer", () => {
       });
 
       ref.viewer.open();
-      ref.viewer.handleInput(Uint8Array.of(0x63)); // c: capture output
+      type(ref.viewer, 0x63); // c: capture output
       await Bun.sleep(5);
 
       expect(captured).toBe(1);
@@ -396,13 +416,13 @@ describe("note viewer", () => {
         },
       });
       viewer.open(); // active tab, cursor on "active"
-      viewer.handleInput(Uint8Array.of(0x72)); // r: only valid on the archive tab
+      type(viewer, 0x72); // r: only valid on the archive tab
       await Bun.sleep(10);
       expect(store.load().find((n) => n.id === active.id)!.archivedAt).toBeNull();
 
-      viewer.handleInput(Uint8Array.of(0x09)); // Tab -> archive
-      viewer.handleInput(Uint8Array.of(0x20)); // Space: only valid on the active tab
-      viewer.handleInput(Uint8Array.of(0x0d)); // Enter: only valid on the active tab
+      type(viewer, 0x09); // Tab -> archive
+      type(viewer, 0x20); // Space: only valid on the active tab
+      type(viewer, 0x0d); // Enter: only valid on the active tab
       await Bun.sleep(5);
       expect(submissions).toBe(0);
       expect(viewer.active).toBe(true);

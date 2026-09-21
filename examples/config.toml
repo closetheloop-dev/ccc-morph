@@ -30,12 +30,13 @@ action = { type = "run", argv = ["sh", "-lc", "your-command"] }
 keys = ["ctrl-b", "l"]
 action = { type = "send", keys = ["ctrl-l"] }
 
-# Open $VISUAL/$EDITOR to add a persistent workspace note.
+# Open the notes hub (in it: a add, c capture output, e edit), then insert
+# selected notes into the wrapped program. This matches the built-in default.
 [[bindings]]
 keys = ["ctrl-b", "n"]
-action = { type = "add-note" }
-
-# Select active workspace notes to insert into the wrapped program for review.
-[[bindings]]
-keys = ["ctrl-b", "p"]
 action = { type = "show-notes" }
+
+# Optional: jump straight to a new $VISUAL/$EDITOR note (the hub can also do this).
+[[bindings]]
+keys = ["ctrl-b", "a"]
+action = { type = "add-note" }

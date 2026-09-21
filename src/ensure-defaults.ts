@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 import { parseConfigText } from "./config";
-import { bytesKey, encodeKeys } from "./keys";
+import { type ChordElement, chordsOverlap, compileChord } from "./keys";
 import type { SessionConfig } from "./types";
 
 export type DefaultBinding = {
@@ -82,8 +82,11 @@ export function ensureDefaults(configPath: string): EnsureResult {
   }
 
   const boundActions = new Set<string>(existing.bindings.map((binding) => binding.action.type));
-  const usedKeys = new Set<string>(
-    existing.bindings.map((binding) => bytesKey(encodeKeys(binding.keys))),
+  // Compiled chords of everything already bound, in the matcher's own identity domain,
+  // so a default is skipped when it would overlap an existing binding (even a raw
+  // hex: spelling of the same keys).
+  const usedChords: ChordElement[][] = existing.bindings.map((binding) =>
+    compileChord(binding.keys),
   );
 
   const added: DefaultBinding[] = [];
@@ -94,8 +97,8 @@ export function ensureDefaults(configPath: string): EnsureResult {
       skipped.push({ binding, reason: "action-bound" });
       continue;
     }
-    const encoded = bytesKey(encodeKeys(binding.keys));
-    if (usedKeys.has(encoded)) {
+    const chord = compileChord(binding.keys);
+    if (usedChords.some((existingChord) => chordsOverlap(existingChord, chord))) {
       skipped.push({ binding, reason: "keys-in-use" });
       continue;
     }
@@ -103,7 +106,7 @@ export function ensureDefaults(configPath: string): EnsureResult {
     added.push(binding);
     // Record so two defaults can never collide with each other in one pass.
     boundActions.add(binding.actionType);
-    usedKeys.add(encoded);
+    usedChords.push(chord);
   }
 
   if (added.length === 0 && !created) {

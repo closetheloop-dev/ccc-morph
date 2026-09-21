@@ -1,87 +1,29 @@
+import { encodeKeyLegacy, type Key } from "./keys";
+
 export type ViewerInputToken = number | "up" | "down" | "page-up" | "page-down";
 
-const ESCAPE = 0x1b;
-const ESCAPE_SEQUENCE_WAIT_MS = 30;
-
-export class ViewerInput {
-  readonly #emit: (token: ViewerInputToken) => void;
-  readonly #pending: number[] = [];
-  #timer: ReturnType<typeof setTimeout> | null = null;
-
-  constructor(emit: (token: ViewerInputToken) => void) {
-    this.#emit = emit;
+// Translate a decoded key (produced once by the shared input pipeline) into the
+// token a wrapper viewer switches on. Terminal input is decoded upstream — legacy
+// bytes AND Kitty CSI-u alike — so under report-all-keys a viewer's q/Enter/Escape
+// still arrive as the right token instead of being misread as escape sequences.
+//
+// Arrows and paging map to the viewer's named tokens; every other key collapses to
+// the single legacy byte the viewers already recognize (q, j/k, Enter, Tab, Space,
+// Escape, Ctrl-D, Shift-D, ...). Keys with no single-byte legacy form (e.g. a
+// modified arrow) return null and are ignored by the viewer. Only presses are
+// dispatched, so a key's release never triggers a command.
+export function keyToViewerToken(key: Key): ViewerInputToken | null {
+  if (!key.mods.ctrl && !key.mods.alt && !key.mods.shift) {
+    if (key.name === "up") return "up";
+    if (key.name === "down") return "down";
+    if (key.name === "page-up") return "page-up";
+    if (key.name === "page-down") return "page-down";
   }
-
-  feed(bytes: Uint8Array): void {
-    this.#cancelTimer();
-    this.#pending.push(...bytes);
-    this.#drain();
+  try {
+    const bytes = encodeKeyLegacy(key);
+    if (bytes.length === 1) return bytes[0]!;
+  } catch {
+    // Unsupported key: the viewer has no command for it.
   }
-
-  reset(): void {
-    this.#cancelTimer();
-    this.#pending.length = 0;
-  }
-
-  #drain(): void {
-    while (this.#pending.length > 0) {
-      if (this.#pending[0] !== ESCAPE) {
-        this.#emit(this.#pending.shift()!);
-        continue;
-      }
-
-      if (this.#pending.length === 1) {
-        this.#waitForEscapeSequence();
-        return;
-      }
-
-      const introducer = this.#pending[1];
-      if (introducer !== 0x5b && introducer !== 0x4f) {
-        this.#emit(this.#pending.shift()!);
-        continue;
-      }
-      if (this.#pending.length === 2) {
-        this.#waitForEscapeSequence();
-        return;
-      }
-
-      const command = this.#pending[2];
-      if (command === 0x41 || command === 0x42) {
-        this.#pending.splice(0, 3);
-        this.#emit(command === 0x41 ? "up" : "down");
-        continue;
-      }
-
-      // Page Up / Page Down are ESC [ 5 ~ and ESC [ 6 ~ (four bytes).
-      if (command === 0x35 || command === 0x36) {
-        if (this.#pending.length === 3) {
-          this.#waitForEscapeSequence();
-          return;
-        }
-        if (this.#pending[3] === 0x7e) {
-          this.#pending.splice(0, 4);
-          this.#emit(command === 0x35 ? "page-up" : "page-down");
-          continue;
-        }
-      }
-
-      // Preserve Escape semantics for an unsupported sequence.
-      this.#emit(this.#pending.shift()!);
-    }
-  }
-
-  #waitForEscapeSequence(): void {
-    this.#timer = setTimeout(() => {
-      this.#timer = null;
-      this.#emit(this.#pending.shift()!);
-      this.#drain();
-    }, ESCAPE_SEQUENCE_WAIT_MS);
-    this.#timer.unref();
-  }
-
-  #cancelTimer(): void {
-    if (this.#timer === null) return;
-    clearTimeout(this.#timer);
-    this.#timer = null;
-  }
+  return null;
 }
