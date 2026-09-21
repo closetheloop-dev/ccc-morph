@@ -41,4 +41,4 @@ docker run --rm -v "$PWD/e2e-out:/e2e/out" ccc-morph-e2e
 ```
 
 CI integration is host-specific. Wire these commands into a build workflow (for example,
-on pushes to `master` and on demand), adapting the job to your CI platform.
+on pushes to `main` or `master` and on demand), adapting the job to your CI platform.

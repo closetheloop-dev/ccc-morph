@@ -1,6 +1,6 @@
 # CI build: on every push/PR, cross-compile all release binaries via the
 # Dockerfile (which also runs lint + typecheck + tests as build gates) and
-# smoke-test the linux-x64 binary. On a push to master (or a manual run) it also
+# smoke-test the linux-x64 binary. On a push to main or master (or a manual run) it also
 # runs the rendered-screen e2e tapes against the freshly built binary. Publishing
 # releases lives in release.yml.
 name: build
@@ -59,10 +59,10 @@ jobs:
           path: out/
 
       # Rendered-screen e2e (ttyd + vhs), reusing the exported linux-x64 binary.
-      # Push to master (or a manual run) only — PRs and pushes to other branches
+      # Push to main or master (or a manual run) only — PRs and pushes to other branches
       # skip it. See test/e2e/README.md.
       - name: Run e2e tapes
-        if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/master') || github.event_name == 'workflow_dispatch' }}
+        if: ${{ (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')) || github.event_name == 'workflow_dispatch' }}
         run: |
           cp out/linux-x64/ccc-morph test/e2e/ccc-morph
           docker build -f test/e2e/Dockerfile -t ccc-morph-e2e test/e2e
@@ -78,7 +78,7 @@ jobs:
           exit "$rc"
 
       - name: Upload e2e artifacts
-        if: ${{ always() && ((github.event_name == 'push' && github.ref == 'refs/heads/master') || github.event_name == 'workflow_dispatch') }}
+        if: ${{ always() && ((github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')) || github.event_name == 'workflow_dispatch') }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: e2e-artifacts
