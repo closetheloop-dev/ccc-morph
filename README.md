@@ -86,7 +86,14 @@ On macOS, if Gatekeeper blocks the binary, clear the download quarantine with
 
 ### Upgrading
 
-To upgrade, download and (optionally) verify the new tarball, extract it, and re-run
+The simplest upgrade is to re-run the install one-liner, which fetches and installs the latest
+release:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/closetheloop-dev/ccc-morph/main/scripts/install.sh | bash
+```
+
+Or download and (optionally) verify the new tarball, extract it, and re-run
 `./install.sh`. It swaps in the new binary, adds any newly bundled app configs, and re-runs
 `ccc-morph --ensure-defaults` to top up the global config with any new default bindings. Your
 own settings are never overwritten: an app config you already have under
