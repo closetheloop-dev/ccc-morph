@@ -18,7 +18,7 @@ works with any interactive program.
   native Windows build.
 - An interactive terminal, needed only for shortcut interception. In a script or pipe,
   ccc-morph just runs the wrapped program as is.
-- Prebuilt binaries are self-contained. Building from source needs Bun 1.3.14+.
+- Prebuilt binaries are self-contained. Building from source needs Bun 1.4.4+.
 
 ## Install
 
@@ -36,7 +36,7 @@ described below. By default it installs the latest release. To pin a version, pa
 variable to `bash` (placing it before `curl` would apply it only to `curl`):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/closetheloop-dev/ccc-morph/main/scripts/install.sh | CCC_MORPH_VERSION=v0.3.0 bash
+curl -fsSL https://raw.githubusercontent.com/closetheloop-dev/ccc-morph/main/scripts/install.sh | CCC_MORPH_VERSION=v0.4.1 bash
 ```
 
 `INSTALL_DIR` (binary location, default `~/.local/bin`) and `XDG_CONFIG_HOME` (config
@@ -176,8 +176,11 @@ ccc-morph simply runs the wrapped command directly, inheriting stdin/stdout/stde
 forwarding its exit code, with no bindings applied.
 
 Limitations: Linux and macOS only — no native Windows/ConPTY build, though it runs under
-[WSL2](https://learn.microsoft.com/windows/wsl/) (which is a real Linux environment; use the `linux-x64` binary). After the error viewer closes,
-programs that ignore terminal resize events may not repaint perfectly until their next
+[WSL2](https://learn.microsoft.com/windows/wsl/) (which is a real Linux environment; use the `linux-x64` binary). The notes hub and
+error viewer open on the terminal's alternate screen, so they stay out of your scrollback
+(including tmux's) and a program on the main screen gets its screen back exactly when they
+close. A full-screen program that is itself on the alternate screen is asked to repaint
+instead; one that ignores terminal resize events may not repaint perfectly until its next
 redraw. See [Code layout](docs/development.md#code-layout) for the internals.
 
 ## The name

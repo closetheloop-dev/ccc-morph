@@ -221,6 +221,12 @@ export class ShortcutMatcher {
     this.#owe(key);
   }
 
+  // Whether a consumed press still owes its release, e.g. the key that just launched an external
+  // editor: the hand-off waits for that release so it is swallowed here instead of echoed.
+  get owesReleases(): boolean {
+    return this.#swallowRelease.size > 0;
+  }
+
   #owe(key: Key): void {
     const id = lifecycleKeyId(key);
     const entry = this.#swallowRelease.get(id);

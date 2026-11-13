@@ -14,45 +14,33 @@ source is the Git tag this binary was built from (see the release page).
 
 | Component  | Source |
 | ---        | --- |
-| Bun 1.3.14 | https://github.com/oven-sh/bun/tree/0d9b296af33f2b851fcbf4df3e9ec89751734ba4 |
-| Bun WebKit | https://github.com/oven-sh/WebKit/tree/5488984d20e0dbfe4be2c3ba8fb18eb81a5e0e8b |
-| Bun TinyCC | https://github.com/oven-sh/tinycc/tree/12882eee073cfe5c7621bcfadf679e1372d4537b |
+| Bun 1.4.4  | https://github.com/oven-sh/bun/tree/38afee6c84fcf48c0edb2466aa4b27d287a59c30 |
+| Bun WebKit | https://github.com/oven-sh/WebKit/tree/d6375c72affe0f70222cdcb45012b10f0bf3a9d5 |
+| Bun TinyCC | https://github.com/oven-sh/tinycc/tree/05f0fafaa3be31e31d7b4b5c17dc60f62c991171 |
 
 The Bun source contains the build scripts and the TinyCC patch Bun applies. The
 WebKit commit is Bun's exact patched JavaScriptCore/WebKit source.
 
-## Rebuilding Bun with a modified WebKit
+## Rebuilding and relinking
+
+Bun's source at the commit above contains its build scripts, which fetch the
+pinned WebKit and TinyCC sources; point them at your modified source to rebuild
+Bun with your changes. Bun's `LICENSE.md`, reproduced in `THIRD_PARTY_NOTICES`,
+describes its workflow for building against a local, modified WebKit, and Bun's
+source documents its build requirements.
+
+Then check out the exact `ccc-morph` release tag and compile it natively with
+the rebuilt runtime, using the project's own build script, which applies its
+compile options and version. Put the directory containing the rebuilt `bun`
+first on `PATH`:
 
 ```sh
-git clone https://github.com/oven-sh/bun.git bun
-git -C bun checkout 0d9b296af33f2b851fcbf4df3e9ec89751734ba4
-
-git clone https://github.com/oven-sh/WebKit.git bun/vendor/WebKit
-git -C bun/vendor/WebKit checkout \
-  5488984d20e0dbfe4be2c3ba8fb18eb81a5e0e8b
-
-cd bun
-bun install --frozen-lockfile
-bun run build:release:local
-```
-
-## Relinking ccc-morph against the rebuilt runtime
-
-After modifying WebKit and rebuilding Bun, check out the exact `ccc-morph`
-release tag and compile it natively with the rebuilt runtime:
-
-```sh
-/path/to/bun/build/release-local/bun build src/cli.ts \
-  --compile --minify \
-  --define 'APP_VERSION="vX.Y.Z"' \
-  --outfile ccc-morph
+PATH="/path/to/rebuilt-bun-dir:$PATH" bun run build:local   # -> dist/ccc-morph
 ```
 
 Build natively on each desired platform. Do **not** pass a `--target=bun-*`
-cross-compilation target during this relinking check, because that may select a
-prebuilt runtime instead of the locally modified Bun. Bun's exact source also
-documents its host toolchain and local-WebKit build requirements.
+cross-compilation target (`build:local` does not), because that may select a
+prebuilt runtime instead of the locally modified Bun.
 
 If the Bun version or any embedded LGPL component revision changes, update the
-pinned commits above and this file before publishing binaries built with the
-new runtime.
+pinned commits above before publishing binaries built with the new runtime.

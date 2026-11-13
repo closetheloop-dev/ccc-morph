@@ -14,7 +14,7 @@
 # Only Linux and macOS targets are built: ccc-morph drives the child via a
 # real PTY and uses `stty`, so there is no Windows/ConPTY target.
 
-FROM docker.io/oven/bun:1.3.14 AS build
+FROM docker.io/oven/bun:1.4.4 AS build
 WORKDIR /app
 
 COPY package.json bun.lock tsconfig.json biome.jsonc ./

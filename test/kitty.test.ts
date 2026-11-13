@@ -11,7 +11,12 @@ import {
   keyId,
   parseKeyName,
 } from "../src/keys";
-import { KeyboardModeStack, KITTY_DISAMBIGUATE, KITTY_REPORT_ALL_KEYS } from "../src/kitty";
+import {
+  KeyboardModeStack,
+  KITTY_DISAMBIGUATE,
+  KITTY_REPORT_ALL_KEYS,
+  ownsInactiveAltMode,
+} from "../src/kitty";
 
 const bytes = (s: string) => Uint8Array.from(s, (c) => c.charCodeAt(0));
 const idOf = (s: string) => keyId(parseKeyName(s));
@@ -478,6 +483,58 @@ describe("KeyboardModeStack", () => {
     expect(bytesKey(s.resetSequence(state))).toBe(
       bytesKey(bytes("\x1b[<u\x1b[?47l\x1b[?1049l\x1b[<u")),
     );
+  });
+
+  test("ownsInactiveAltMode flags a main screen that still has an alternate-screen mode set", () => {
+    const state = (controls: string) => {
+      const s = new KeyboardModeStack();
+      s.feed(bytes(controls));
+      return s.snapshot();
+    };
+    expect(ownsInactiveAltMode(state(""))).toBe(false); // plain main screen
+    expect(ownsInactiveAltMode(state("\x1b[?1049h"))).toBe(false); // on the alternate screen
+    expect(ownsInactiveAltMode(state("\x1b[?1049h\x1b[?1049l"))).toBe(false); // left it cleanly
+    // ?1049;47h then ?47l: back on main, but 1049 (and the cursor it saved) is still the child's.
+    expect(ownsInactiveAltMode(state("\x1b[?1049;47h\x1b[?47l"))).toBe(true);
+  });
+
+  test("restoreSequence re-pushes the stacks and re-enters the active alternate screen", () => {
+    const s = new KeyboardModeStack();
+    s.feed(bytes("\x1b[>1u\x1b[?1047h\x1b[>8u")); // main[1]; alt via 1047; alt[8]
+    expect(bytesKey(s.restoreSequence(s.snapshot()))).toBe(
+      bytesKey(bytes("\x1b[>1u\x1b[?1047h\x1b[>8u")),
+    );
+    // Back on main with a stack left on alt: visit alt via the non-saving 47 to re-push it.
+    const t = new KeyboardModeStack();
+    t.feed(bytes("\x1b[>1u\x1b[?1049h\x1b[>8u\x1b[?1049l"));
+    expect(bytesKey(t.restoreSequence(t.snapshot()))).toBe(
+      bytesKey(bytes("\x1b[>1u\x1b[?47h\x1b[>8u\x1b[?47l")),
+    );
+    expect(new KeyboardModeStack().restoreSequence(new KeyboardModeStack().snapshot()).length).toBe(
+      0,
+    );
+  });
+
+  test("restoreSequence rebuilds the exposed state that resetSequence tore down", () => {
+    for (const controls of [
+      "",
+      "\x1b[>1u\x1b[>8u",
+      "\x1b[>1u\x1b[?1047h\x1b[>8u",
+      "\x1b[>1u\x1b[?47;1049h\x1b[>8u",
+      "\x1b[>1u\x1b[?1049h\x1b[>8u\x1b[?1049l",
+    ]) {
+      const child = new KeyboardModeStack();
+      child.feed(bytes(controls));
+      const state = child.snapshot();
+      // A model of the terminal taken through the reset lands on the default state, and the
+      // restore brings it back to exactly the child's exposed state.
+      const terminal = new KeyboardModeStack();
+      terminal.feed(bytes(controls));
+      terminal.feed(child.resetSequence(state));
+      expect(terminal.snapshot()).toEqual({ main: [], alt: [], active: "main", altSetModes: [] });
+      terminal.feed(child.restoreSequence(state));
+      expect(terminal.snapshot()).toEqual(state);
+    }
   });
 
   test("a long recording is replayed VERBATIM in order, preserving an outstanding 1049 and its reset", () => {

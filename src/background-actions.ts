@@ -117,7 +117,8 @@ export class BackgroundActions {
           argv,
           occurredAt: new Date(),
           exitCode,
-          signal: child.signalCode ?? null,
+          // Bun reports a signal by name, or by number when it has no standard name.
+          signal: child.signalCode == null ? null : String(child.signalCode),
           message: null,
           stdout: stdout.text,
           stderr: stderr.text,

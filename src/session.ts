@@ -6,7 +6,7 @@ import { ChildWriter } from "./child-writer";
 import { compileBindings } from "./config";
 import { ErrorViewer } from "./error-viewer";
 import { encodeKeysActive, encodeRawHex, type InputToken, type Key } from "./keys";
-import { KeyboardModeStack, type ScreenModes } from "./kitty";
+import { KeyboardModeStack, ownsInactiveAltMode, type ScreenModes } from "./kitty";
 import { InputRouter, ShortcutMatcher } from "./matcher";
 import { NoteStore, type WorkspaceNote } from "./note-store";
 import { NoteViewer } from "./note-viewer";
@@ -30,6 +30,11 @@ const REDRAW_FALLBACK_MS = 300;
 // until the user opens the error viewer. The delay keeps the repaint out of
 // the middle of a frame (never splitting a child escape sequence).
 const NOTICE_REASSERT_MS = 80;
+
+// Before handing the terminal to an external editor, wait at most this long for the release
+// of the key that launched it, so the release is swallowed while input is still raw instead
+// of being echoed by the cooked tty and read by the editor.
+const EDITOR_RELEASE_SETTLE_MS = 150;
 
 // How many recent agent responses the browser lists (newest first). Bounds the list on
 // long transcripts while keeping plenty of history to scroll back through.
@@ -145,6 +150,10 @@ export class TerminalSession {
   // closes (the terminal missed any mode changes made behind the modal). It is also
   // the state the terminal is actually left in, so cleanup resets from it.
   #modeStackAtModalOpen: ScreenModes | null = null;
+  // ccc-morph's own alternate-screen layer while a modal is shown over a main-screen child
+  // (null when not entered). `pushed` records whether a keyboard-mode entry was pushed onto
+  // the alt screen's stack, so leaving pops exactly what entering pushed.
+  #modalScreen: { pushed: boolean } | null = null;
 
   // All terminal input flows through the one router so it is decoded exactly once
   // (legacy bytes and Kitty CSI-u alike); the router's sink then dispatches decoded
@@ -162,8 +171,10 @@ export class TerminalSession {
   #routeKeys(tokens: InputToken[]): void {
     for (const token of tokens) {
       if (token.kind === "key" && token.event === "press" && this.#modalActive()) {
-        this.#dispatchViewerKey(token.key);
+        // Owe first: the viewer action may hand the terminal to an external editor, which
+        // waits for exactly this debt to settle before the tty turns cooked.
         this.#matcher?.oweRelease(token.key);
+        this.#dispatchViewerKey(token.key);
       } else if (token.kind !== "key" && this.#modalActive()) {
         // Non-key input (mouse, unknown escapes) has no meaning to a viewer; drop it.
       } else {
@@ -210,6 +221,12 @@ export class TerminalSession {
 
   readonly #signalHandlers = new Map<NodeJS.Signals, () => void>();
   readonly #onProcessExit = (): void => {
+    // Abnormal exit with a modal up: don't leave the user's terminal on the modal screen.
+    try {
+      this.#exitModalScreen();
+    } catch {
+      // Best effort while exiting.
+    }
     this.#restoreOuterTerminal();
   };
 
@@ -392,12 +409,14 @@ export class TerminalSession {
       return;
     }
     if (action.type === "show-errors") {
-      const wasModal = this.#modalActive();
+      // One modal at a time: an error viewer opened over the notes modal (two bindings can
+      // fire in one matcher pass) would end that modal's recording and screen on close.
+      if (this.#modalActive() || !this.#viewer.canOpen) return;
+      // Snapshot and switch screens BEFORE open(): it renders its first frame immediately.
+      this.#modeStackAtModalOpen = this.#keyboard.snapshot();
+      this.#keyboard.startRecording();
+      this.#enterModalScreen(this.#modeStackAtModalOpen);
       if (this.#viewer.open()) {
-        if (!wasModal) {
-          this.#modeStackAtModalOpen = this.#keyboard.snapshot();
-          this.#keyboard.startRecording();
-        }
         // The errors are seen now: stop re-asserting the failure notice.
         this.#failureNotice = null;
         if (this.#reassertTimer !== null) {
@@ -553,6 +572,9 @@ export class TerminalSession {
     // and screen state faithfully, in order.
     const snapshot = this.#modeStackAtModalOpen;
     this.#modeStackAtModalOpen = null;
+    // Back to the child's screen first, so the replay's own screen switches and keyboard
+    // pushes/pops land where the child made them.
+    this.#exitModalScreen();
     if (snapshot !== null) {
       const replay = this.#keyboard.stopRecording();
       if (replay.length > 0) process.stdout.write(replay);
@@ -638,10 +660,38 @@ export class TerminalSession {
     this.#outputs.open(items);
   }
 
+  // Draw a modal on the alternate screen when the child is on the main screen, so its clears
+  // and frames never land on the main screen or in the terminal's scrollback (tmux pushes a
+  // cleared screen into history), and closing restores the child's screen exactly. A child
+  // already on the alternate screen keeps today's behaviour: alt content is not scrollback.
+  // So does a child that still owns a set alternate-screen mode on the main screen, which a
+  // switch of ours would disturb (see ownsInactiveAltMode).
+  // Terminals keep separate keyboard-mode stacks per screen, so the exposed flags are pushed
+  // onto the alt stack too: keys keep being reported exactly as before the switch.
+  #enterModalScreen(snapshot: ScreenModes): void {
+    if (this.#modalScreen !== null || snapshot.active !== "main") return;
+    if (ownsInactiveAltMode(snapshot)) return;
+    const top = (stack: number[]): number => (stack.length > 0 ? stack[stack.length - 1]! : 0);
+    const flags = top(snapshot.main);
+    const pushed = flags !== top(snapshot.alt);
+    process.stdout.write(`\x1b[?1049h${pushed ? `\x1b[>${flags}u` : ""}`);
+    this.#modalScreen = { pushed };
+  }
+
+  // Leave the modal screen: pop what entering pushed, then return to the main screen. Must
+  // run after the modal's own clears and before the child's recorded controls are replayed.
+  #exitModalScreen(): void {
+    const screen = this.#modalScreen;
+    if (screen === null) return;
+    this.#modalScreen = null;
+    process.stdout.write(`${screen.pushed ? "\x1b[<u" : ""}\x1b[?1049l`);
+  }
+
   #beginNotesModal(): boolean {
     if (this.#modalActive()) return false;
     this.#modeStackAtModalOpen = this.#keyboard.snapshot();
     this.#keyboard.startRecording();
+    this.#enterModalScreen(this.#modeStackAtModalOpen);
     this.#notesModalPaused = this.#config.notesChildMode === "pause";
     if (this.#notesModalPaused) this.#signalChildGroup("SIGSTOP");
     return true;
@@ -688,6 +738,35 @@ export class TerminalSession {
   // editor wrote the file: quitting without writing (e.g. vim :q!) reports saved:false
   // regardless of filesystem timestamp granularity.
   async #runEditor(initialText: string): Promise<{ saved: boolean; text: string; error?: string }> {
+    // A child on the main screen that still owns a set alternate-screen mode cannot be handed to
+    // an editor without losing that mode: the editor switches screens itself (overwriting the
+    // cursor that mode saved) and resets keyboard modes on exit, and the mode cannot be rebuilt
+    // afterwards without switching screens (see ownsInactiveAltMode). Decline before touching
+    // the terminal, so its state and the observer's model stay in step.
+    const exposed = this.#modeStackAtModalOpen ?? this.#keyboard.snapshot();
+    if (ownsInactiveAltMode(exposed)) {
+      return {
+        saved: false,
+        text: "",
+        error: "note editor unavailable while the program holds an alternate-screen mode",
+      };
+    }
+    // Let the release of the key that launched the editor arrive while input is still raw and
+    // routed, so the matcher swallows it: once the tty is cooked it would be echoed onto the
+    // screen and read by the editor as input.
+    const settleDeadline = Date.now() + EDITOR_RELEASE_SETTLE_MS;
+    while (this.#matcher?.owesReleases && Date.now() < settleDeadline) await Bun.sleep(5);
+    // The editor owns the real terminal and switches screens itself: vim's ?1049h ... ?1049l
+    // would otherwise drop the terminal to the main screen under the still-open modal. Step
+    // off the modal screen for the editor's run and back on afterwards (see finally).
+    const leftModalScreen = this.#modalScreen !== null;
+    this.#exitModalScreen();
+    // Hand the editor the terminal in its default state (main screen, legacy keys) and rebuild
+    // the child's modes afterwards (see finally). Editors restore the default state on exit, not
+    // the one they were handed: vim re-sends its keyboard reset after leaving its own alternate
+    // screen, which would otherwise overwrite the child's keyboard mode on the main screen.
+    const reset = this.#keyboard.resetSequence(exposed);
+    if (reset.length > 0) process.stdout.write(reset);
     process.stdin.off("data", this.#onInput);
     process.stdin.pause();
     const savedState = this.#savedTerminalState;
@@ -732,6 +811,10 @@ export class TerminalSession {
           // Best effort; the modal transition below repaints regardless.
         }
       }
+      const restore = this.#keyboard.restoreSequence(exposed);
+      if (restore.length > 0) process.stdout.write(restore);
+      const snapshot = this.#modeStackAtModalOpen;
+      if (leftModalScreen && snapshot !== null) this.#enterModalScreen(snapshot);
       process.stdin.resume();
       process.stdin.on("data", this.#onInput);
     }
@@ -934,6 +1017,13 @@ export class TerminalSession {
     if (this.#viewer.active) {
       if (overflow) this.#viewer.deactivate();
       else this.#viewer.close();
+    }
+    // A modal still showing (overflow, or a deactivated notes/history view) is on ccc-morph's
+    // own screen: leave it before the reset, whose pops must reach the child's stacks.
+    try {
+      this.#exitModalScreen();
+    } catch {
+      // stdout may already be gone during a hard shutdown.
     }
     // Safety net: return the outer terminal to legacy encoding so the user's shell is
     // not left enhanced. Reset from the state the terminal was actually LEFT IN — a

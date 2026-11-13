@@ -56,8 +56,13 @@ export class ErrorViewer {
     }
   }
 
+  // Whether open() would succeed, so the caller can prepare the screen before the first frame.
+  get canOpen(): boolean {
+    return this.#errors.length > 0 && !this.#active;
+  }
+
   open(): boolean {
-    if (this.#errors.length === 0 || this.#active) return false;
+    if (!this.canOpen) return false;
     this.#unseen = false;
     this.#active = true;
     this.#index = this.#errors.length - 1;

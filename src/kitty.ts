@@ -28,6 +28,15 @@ const REPLAY_LIMIT = 262144;
 export type ScreenModes = { main: number[]; alt: number[]; active: Screen; altSetModes: number[] };
 type Screen = "main" | "alt";
 
+// Whether the child is on the main screen yet still owns a set alternate-screen mode, e.g. after
+// ?1049;47h then ?47l, which leaves 1049 set together with the cursor it saved. The wrapper's own
+// screen transitions must leave that state alone: entering the alternate screen via a set mode
+// overwrites its saved cursor, leaving it clears a mode the child still owns, and the mode cannot
+// be re-set later without switching screens.
+export function ownsInactiveAltMode(state: ScreenModes): boolean {
+  return state.active === "main" && state.altSetModes.length > 0;
+}
+
 // The private-mode numbers that switch to the alternate screen (h) or back (l). Each
 // is an independent action: ANY of them reset returns to the main buffer, regardless
 // of which others were set.
@@ -147,6 +156,30 @@ export class KeyboardModeStack {
     leaveModes.push(...[...state.altSetModes].reverse());
     for (const mode of leaveModes) parts.push(`\x1b[?${mode}l`);
     if (state.main.length > 0) parts.push("\x1b[<u".repeat(state.main.length));
+    return parts.length > 0 ? encoder.encode(parts.join("")) : EMPTY;
+  }
+
+  // The inverse of resetSequence: bytes that rebuild the given exposed state from the default
+  // (main screen, legacy encoding). Re-push the main screen's stack; re-enter the alternate
+  // screen by every mode that was set, in order, and re-push its stack; or, when the alternate
+  // screen is not active but kept a stack, visit it via the non-saving 47 to re-push it. Used
+  // after handing the terminal to an external program (the note editor), which leaves the
+  // terminal in its default state rather than the one it was handed. (A mode still set on an
+  // inactive alternate screen is not re-set: entering it would switch screens.)
+  restoreSequence(state: ScreenModes): Uint8Array {
+    const parts: string[] = [];
+    const push = (stack: number[]): void => {
+      for (const flags of stack) parts.push(`\x1b[>${flags}u`);
+    };
+    push(state.main);
+    if (state.active === "alt") {
+      for (const mode of state.altSetModes) parts.push(`\x1b[?${mode}h`);
+      push(state.alt);
+    } else if (state.alt.length > 0) {
+      parts.push("\x1b[?47h");
+      push(state.alt);
+      parts.push("\x1b[?47l");
+    }
     return parts.length > 0 ? encoder.encode(parts.join("")) : EMPTY;
   }
 

@@ -2141,8 +2141,9 @@ action = { type = "show-notes" }
     await Bun.sleep(600); // the child's pop (at ~400ms) happens behind the modal, suppressed
     expect(output()).not.toContain("\x1b[<u"); // the suppressed pop was not delivered yet
     child.terminal!.write("q"); // close the hub
-    // Closing replays the child's captured pop control to the terminal verbatim.
-    await waitFor("\x1b[<u");
+    // Closing pops ccc-morph's own alt-screen entry and leaves its modal screen, THEN replays
+    // the child's captured pop verbatim, on the main screen where the child made it.
+    await waitFor("\x1b[<u\x1b[?1049l\x1b[<u");
   } finally {
     try {
       child.kill("SIGKILL");
@@ -2373,9 +2374,10 @@ action = { type = "show-notes" }
     // The child pops (suppressed) and exits behind the open modal.
     expect(await child.exited).toBe(0);
     await Bun.sleep(50);
-    // Cleanup resets from the state the terminal was actually left in (the snapshot),
-    // popping the enhancement the suppressed pop never delivered.
-    expect(output()).toContain("\x1b[<u");
+    // Cleanup first leaves ccc-morph's modal screen (popping its own alt-screen entry), then
+    // resets from the state the terminal was actually left in (the snapshot), popping the
+    // enhancement the suppressed pop never delivered -- on the main screen, not the alt one.
+    expect(output()).toContain("\x1b[<u\x1b[?1049l\x1b[<u");
   } finally {
     try {
       child.kill("SIGKILL");
@@ -2451,10 +2453,13 @@ action = { type = "show-notes" }
     child.terminal!.write(Uint8Array.of(16)); // Ctrl-P: open the notes hub (snapshot main)
     await waitFor("ccc-morph notes [active]");
     await Bun.sleep(600); // the child enters alt + pushes 8 behind the modal (suppressed)
-    expect(output()).not.toContain("\x1b[?1049h"); // not delivered while suppressed
+    // The only ?1049h so far is ccc-morph's own modal screen; the child's is not delivered.
+    expect(output().split("\x1b[?1049h").length - 1).toBe(1);
+    expect(output()).not.toContain("\x1b[>8u");
     child.terminal!.write("q"); // close the hub -> reconcile
-    // Reconcile enters the alternate screen the child moved to and re-pushes flag 8.
-    await waitFor("\x1b[?1049h\x1b[>8u");
+    // ccc-morph leaves its modal screen first, then the replay enters the alternate screen
+    // the child moved to and re-pushes flag 8.
+    await waitFor("\x1b[?1049l\x1b[?1049h\x1b[>8u");
   } finally {
     try {
       child.kill("SIGKILL");
@@ -2796,8 +2801,11 @@ action = { type = "show-notes" }
     // The user's terminal was reset from the enhanced modal-opening snapshot (the enhanced
     // push is popped) and told why -- not left enhanced or reset from a diverged state.
     const afterModal = output().slice(beforeModal);
-    expect(afterModal).toContain("\x1b[<u"); // pop of the outstanding enhanced mode
-    expect(afterModal).toContain("[ccc-morph] terminated");
+    // Leave ccc-morph's modal screen (pop its alt entry), then pop the outstanding enhanced
+    // mode on the main screen, then explain.
+    const reset = afterModal.indexOf("\x1b[<u\x1b[?1049l\x1b[<u");
+    expect(reset).toBeGreaterThanOrEqual(0);
+    expect(reset).toBeLessThan(afterModal.indexOf("[ccc-morph] terminated"));
   } finally {
     try {
       child.kill("SIGKILL");
@@ -2893,7 +2901,9 @@ action = { type = "add-note" }
     await waitFor("READY");
     child.terminal!.write(Uint8Array.of(14)); // Ctrl-N: add-note -> launch the external editor
     await waitForFile(pidMarker); // the editor is running
-    await waitFor("\x1b[?1049h"); // ...and has entered the alternate screen directly
+    // ...and has entered the alternate screen directly (its own switch + push, which is
+    // distinct from ccc-morph's modal screen: no keyboard push at an unenhanced snapshot).
+    await waitFor("\x1b[?1049h\x1b[>1u");
     const editorPid = Number.parseInt(readFileSync(pidMarker, "utf8").trim(), 10);
     const noteDir = join(readFileSync(pathMarker, "utf8").trim(), "..");
 
@@ -2921,8 +2931,15 @@ action = { type = "add-note" }
     // The editor's own teardown ran (it left the alternate screen) BEFORE the wrapper's
     // diagnostic, so the shell-facing terminal is back on main -- not stranded on alt.
     const full = output();
-    expect(full).toContain("\x1b[?1049l"); // editor left the alternate screen
-    expect(full.indexOf("\x1b[?1049l")).toBeLessThan(full.indexOf("[ccc-morph] terminated"));
+    const terminated = full.indexOf("[ccc-morph] terminated");
+    // The editor's own teardown (pop its flag, leave the alternate screen) ran before it.
+    const editorTeardown = full.indexOf("\x1b[<u\x1b[?1049l");
+    expect(editorTeardown).toBeGreaterThanOrEqual(0);
+    expect(editorTeardown).toBeLessThan(terminated);
+    // And the LAST screen switch before the diagnostic leaves the main screen up: ccc-morph's
+    // modal screen (re-entered after the editor) was left too.
+    const lastLeave = full.lastIndexOf("\x1b[?1049l", terminated);
+    expect(lastLeave).toBeGreaterThan(full.lastIndexOf("\x1b[?1049h", terminated));
 
     // Nothing orphaned: the editor exited and its temp dir was cleaned by #runEditor's finally.
     let editorAlive = true;
@@ -2941,5 +2958,410 @@ action = { type = "add-note" }
     }
     child.terminal?.close();
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+// Shared harness for the modal-screen tests below: runs the wrapper over an inline `bun -e`
+// child and captures every byte written to the outer terminal. `prepare` may write files into
+// the temp directory and return extra environment (e.g. a scripted $EDITOR).
+function startModalScreenSession(
+  name: string,
+  configText: string,
+  childScript: string,
+  prepare: (directory: string) => Record<string, string> = () => ({}),
+) {
+  const bun = Bun.which("bun");
+  if (!bun) throw new Error("Bun executable not found");
+  const directory = mkdtempSync(join(tmpdir(), `ccc-morph-modal-screen-${name}-`));
+  const workspace = join(directory, "workspace");
+  const config = join(directory, "config.toml");
+  mkdirSync(workspace);
+  writeFileSync(config, configText);
+  const extraEnv = prepare(directory);
+  const chunks: Uint8Array[] = [];
+  const child = Bun.spawn(
+    [
+      bun,
+      "run",
+      resolve(import.meta.dir, "../src/cli.ts"),
+      "--config",
+      config,
+      "--",
+      bun,
+      "-e",
+      childScript,
+    ],
+    {
+      cwd: workspace,
+      env: { ...process.env, XDG_CONFIG_HOME: join(directory, "xdg"), ...extraEnv },
+      terminal: {
+        cols: 80,
+        rows: 24,
+        data(_terminal, bytes) {
+          chunks.push(bytes.slice());
+        },
+      },
+    },
+  );
+  const output = (): string => new TextDecoder().decode(Buffer.concat(chunks));
+  const waitFor = async (needle: string, from = 0): Promise<void> => {
+    for (let attempt = 0; attempt < 300; attempt += 1) {
+      if (output().indexOf(needle, from) >= 0) return;
+      await Bun.sleep(10);
+    }
+    throw new Error(
+      `timed out waiting for ${JSON.stringify(needle)}; output ${JSON.stringify(output())}`,
+    );
+  };
+  const dispose = (): void => {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already exited.
+    }
+    child.terminal?.close();
+    rmSync(directory, { recursive: true, force: true });
+  };
+  return { child, output, waitFor, dispose };
+}
+
+const MODAL_NOTES_CONFIG = `version = 1
+sequence_timeout_ms = 30
+notes_child_mode = "continue"
+[[bindings]]
+keys = ["ctrl-p"]
+action = { type = "show-notes" }
+`;
+
+test("a modal over a main-screen child is drawn on the alternate screen and never clears main", async () => {
+  // The child enhances the keyboard (flag 8) on the main screen and stays there.
+  const session = startModalScreenSession(
+    "main",
+    MODAL_NOTES_CONFIG,
+    "process.stdin.setRawMode(true); process.stdin.on('data', () => {}); process.stdout.write('\\x1b[>8u'); console.log('READY')",
+  );
+  try {
+    await session.waitFor("READY");
+    await Bun.sleep(60); // the push is observed, so the modal-open snapshot is enhanced
+    const opened = session.output().length;
+    session.child.terminal!.write(Uint8Array.of(16)); // Ctrl-P: open the notes hub
+    await session.waitFor("ccc-morph notes [active]", opened);
+    session.child.terminal!.write("j"); // re-renders, each starting with a clear
+    session.child.terminal!.write("k");
+    await Bun.sleep(100);
+    session.child.terminal!.write("q");
+    await session.waitFor("\x1b[?1049l", opened);
+    const after = session.output().slice(opened);
+    // Enter the alternate screen, re-pushing flag 8 there so keys are reported unchanged,
+    // before the first frame...
+    const enter = after.indexOf("\x1b[?1049h\x1b[>8u");
+    expect(enter).toBeGreaterThanOrEqual(0);
+    expect(enter).toBeLessThan(after.indexOf("ccc-morph notes"));
+    // ...and leave it, popping that entry, only after the last frame.
+    const leave = after.indexOf("\x1b[<u\x1b[?1049l");
+    expect(leave).toBeGreaterThan(after.lastIndexOf("ccc-morph notes"));
+    // Every clear the modal wrote landed on the alternate screen; none reached main (where
+    // tmux would push the screen into scrollback).
+    let clear = after.indexOf("\x1b[2J");
+    expect(clear).toBeGreaterThan(enter);
+    while (clear >= 0) {
+      expect(clear).toBeGreaterThan(enter);
+      expect(clear).toBeLessThan(leave);
+      clear = after.indexOf("\x1b[2J", clear + 1);
+    }
+  } finally {
+    session.dispose();
+  }
+});
+
+test("a modal over an alternate-screen child stays on that screen without a switch of its own", async () => {
+  // A full-screen child already on the alternate screen; it reports the close's repaint nudge.
+  const session = startModalScreenSession(
+    "alt",
+    MODAL_NOTES_CONFIG,
+    "process.stdin.setRawMode(true); process.stdin.on('data', () => {}); process.on('SIGWINCH', () => console.log('WINCH')); process.stdout.write('\\x1b[?1049h'); console.log('READY')",
+  );
+  try {
+    await session.waitFor("READY");
+    await Bun.sleep(60);
+    const opened = session.output().length;
+    session.child.terminal!.write(Uint8Array.of(16)); // Ctrl-P: open the notes hub
+    await session.waitFor("ccc-morph notes [active]", opened);
+    session.child.terminal!.write("q");
+    await session.waitFor("WINCH", opened); // the modal closed and nudged the child
+    const full = session.output();
+    expect(full.split("\x1b[?1049h").length - 1).toBe(1); // only the child's own
+    expect(full).not.toContain("\x1b[?1049l");
+  } finally {
+    session.dispose();
+  }
+});
+
+test("the error viewer switches to the alternate screen before its first frame", async () => {
+  const session = startModalScreenSession(
+    "errors",
+    `version = 1
+sequence_timeout_ms = 30
+[[bindings]]
+keys = ["ctrl-f"]
+action = { type = "run", argv = ["sh", "-c", "echo boom >&2; exit 1"] }
+[[bindings]]
+keys = ["ctrl-e"]
+action = { type = "show-errors" }
+`,
+    "process.stdin.setRawMode(true); process.stdin.on('data', () => {}); console.log('READY')",
+  );
+  try {
+    await session.waitFor("READY");
+    session.child.terminal!.write(Uint8Array.of(6)); // Ctrl-F: a failing background command
+    await session.waitFor("failed:");
+    const opened = session.output().length;
+    session.child.terminal!.write(Uint8Array.of(5)); // Ctrl-E: open the error viewer
+    await session.waitFor("ccc-morph action error", opened);
+    session.child.terminal!.write("q");
+    await session.waitFor("\x1b[?1049l", opened);
+    const after = session.output().slice(opened);
+    const enter = after.indexOf("\x1b[?1049h");
+    expect(enter).toBeGreaterThanOrEqual(0);
+    expect(enter).toBeLessThan(after.indexOf("ccc-morph action error"));
+    expect(after.indexOf("\x1b[?1049l")).toBeGreaterThan(
+      after.lastIndexOf("ccc-morph action error"),
+    );
+  } finally {
+    session.dispose();
+  }
+});
+
+test("an editor's own screen switch does not drop the notes hub onto the main screen", async () => {
+  // A scripted $EDITOR that, like vim, enters and leaves the alternate screen itself, and
+  // saves a note in between.
+  const session = startModalScreenSession(
+    "editor",
+    MODAL_NOTES_CONFIG,
+    "process.stdin.setRawMode(true); process.stdin.on('data', () => {}); console.log('READY')",
+    (directory) => {
+      const editor = join(directory, "fake-editor.sh");
+      writeFileSync(
+        editor,
+        `#!/bin/sh\nprintf '\\033[?1049hEDITOR'\nprintf 'editor note' > "$1"\nprintf '\\033[?1049l'\n`,
+        { mode: 0o755 },
+      );
+      return { EDITOR: editor, VISUAL: "" };
+    },
+  );
+  try {
+    await session.waitFor("READY");
+    session.child.terminal!.write(Uint8Array.of(16)); // Ctrl-P: open the notes hub
+    await session.waitFor("ccc-morph notes [active]");
+    const opened = session.output().length;
+    session.child.terminal!.write("a"); // add a note in the external editor
+    await session.waitFor("editor note", opened); // back in the hub, listing the new note
+    const after = session.output().slice(opened);
+    const editorRan = after.indexOf("EDITOR");
+    // ccc-morph stepped off its modal screen before the editor took the terminal...
+    expect(after.indexOf("\x1b[?1049l")).toBeLessThan(editorRan);
+    // ...and back on after the editor left its own alternate screen, before repainting the
+    // hub -- so the hub never paints the main screen.
+    const editorLeft = after.indexOf("\x1b[?1049l", editorRan);
+    const reentered = after.indexOf("\x1b[?1049h", editorLeft);
+    expect(reentered).toBeGreaterThan(editorLeft);
+    expect(reentered).toBeLessThan(after.indexOf("ccc-morph notes", editorLeft));
+    session.child.terminal!.write("q");
+  } finally {
+    session.dispose();
+  }
+});
+
+// The child enters the alternate screen via 1049 AND 47, then leaves via 47 only: it is back on
+// the main screen but still owns 1049 and the cursor 1049 saved. Reports repaint nudges.
+const LINGERING_1049_CHILD =
+  "process.stdin.setRawMode(true); process.stdin.on('data', () => {}); process.on('SIGWINCH', () => console.log('WINCH')); process.stdout.write('\\x1b[?1049;47h\\x1b[?47l'); console.log('READY')";
+
+test("a modal over a main-screen child that still owns 1049 leaves that mode and cursor alone", async () => {
+  const session = startModalScreenSession(
+    "lingering-1049",
+    MODAL_NOTES_CONFIG,
+    LINGERING_1049_CHILD,
+  );
+  try {
+    await session.waitFor("READY");
+    await Bun.sleep(60); // the lingering 1049 is observed
+    const opened = session.output().length;
+    session.child.terminal!.write(Uint8Array.of(16)); // Ctrl-P: open the notes hub
+    await session.waitFor("ccc-morph notes [active]", opened);
+    session.child.terminal!.write("q");
+    await session.waitFor("WINCH", opened); // the modal closed and nudged the child
+    const after = session.output().slice(opened);
+    // No 1049h of ccc-morph's own (it would overwrite the child's saved cursor) and no 1049l
+    // (it would clear the child's mode and restore the wrong cursor).
+    expect(after).not.toContain("\x1b[?1049h");
+    expect(after).not.toContain("\x1b[?1049l");
+  } finally {
+    session.dispose();
+  }
+});
+
+// A scripted $EDITOR that behaves like vim's keyboard-protocol handling: it SETS (rather than
+// pushes) its flags on its own alternate screen and, on exit, re-sends the reset after leaving
+// that screen -- so the final `=0;1u` lands on whichever screen the terminal is back on.
+function writeVimLikeEditor(directory: string, noteText: string): string {
+  const editor = join(directory, "vim-like-editor.sh");
+  writeFileSync(
+    editor,
+    `#!/bin/sh\nprintf '\\033[?1049h\\033[=1;1uEDITOR\\033[=0;1u\\033[?1049l\\033[=0;1u'\n` +
+      `printf '${noteText}' > "$1"\n`,
+    { mode: 0o755 },
+  );
+  return editor;
+}
+
+test("the key that launches the editor has its release settled before the tty turns cooked", async () => {
+  const bun = Bun.which("bun");
+  if (!bun) throw new Error("Bun executable not found");
+  let marker = "";
+  // The child reports releases (event types 2 + all keys 8), so the hub's `a` owes its release.
+  const session = startModalScreenSession(
+    "editor-release",
+    MODAL_NOTES_CONFIG,
+    "process.stdin.setRawMode(true); process.stdin.on('data', () => {}); process.stdout.write('\\x1b[>10u'); console.log('READY')",
+    (directory) => {
+      // An editor that records every byte it reads from the terminal, then saves a note.
+      marker = join(directory, "editor-input.hex");
+      const editor = join(directory, "recording-editor");
+      writeFileSync(
+        editor,
+        `#!${bun}\nconst fs = require("fs");\nprocess.stdin.setRawMode(true);\nconst got = [];\n` +
+          `process.stdin.on("data", (d) => got.push(...d));\nsetTimeout(() => {\n` +
+          `  fs.writeFileSync(${JSON.stringify(marker)}, Buffer.from(got).toString("hex"));\n` +
+          `  fs.writeFileSync(process.argv[2], "settled note");\n  process.exit(0);\n}, 300);\n`,
+        { mode: 0o755 },
+      );
+      return { EDITOR: editor, VISUAL: "" };
+    },
+  );
+  try {
+    await session.waitFor("READY");
+    await Bun.sleep(60); // flags 10 are observed: a consumed press now owes its release
+    session.child.terminal!.write("\x1b[112;5u"); // Ctrl-P press: open the notes hub
+    session.child.terminal!.write("\x1b[112;5:3u"); // ...and its release
+    await session.waitFor("ccc-morph notes [active]");
+    const opened = session.output().length;
+    session.child.terminal!.write("\x1b[97u"); // `a` press: add a note in the editor
+    await Bun.sleep(40); // the physical release follows a moment later
+    session.child.terminal!.write("\x1b[97;1:3u");
+    await session.waitFor("settled note", opened); // back in the hub, listing the new note
+    const releaseHex = Buffer.from("\x1b[97;1:3u").toString("hex");
+    // The release was swallowed while input was still raw: the editor never read it, and the
+    // cooked tty never echoed it onto the screen.
+    expect(readFileSync(marker, "utf8")).not.toContain(releaseHex);
+    expect(session.output().slice(opened)).not.toContain("97;1:3u");
+  } finally {
+    session.dispose();
+  }
+});
+
+test("a vim-like editor cannot overwrite a main-screen child's keyboard mode", async () => {
+  const session = startModalScreenSession(
+    "editor-main-modes",
+    MODAL_NOTES_CONFIG,
+    "process.stdin.setRawMode(true); process.stdin.on('data', () => {}); process.stdout.write('\\x1b[>8u'); console.log('READY')",
+    (directory) => ({ EDITOR: writeVimLikeEditor(directory, "main note"), VISUAL: "" }),
+  );
+  try {
+    await session.waitFor("READY");
+    await Bun.sleep(60); // the child's flag 8 on main is observed
+    session.child.terminal!.write(Uint8Array.of(16)); // Ctrl-P: open the notes hub
+    await session.waitFor("ccc-morph notes [active]");
+    const opened = session.output().length;
+    session.child.terminal!.write("a");
+    await session.waitFor("main note", opened);
+    const after = session.output().slice(opened);
+    const editorRan = after.indexOf("EDITOR");
+    // Before the editor: leave ccc-morph's modal screen (popping its alt entry), then hand the
+    // editor a default terminal by popping the child's flag 8 off the main screen.
+    const handOff = after.indexOf("\x1b[<u\x1b[?1049l\x1b[<u");
+    expect(handOff).toBeGreaterThanOrEqual(0);
+    expect(handOff).toBeLessThan(editorRan);
+    // After the editor's trailing main-screen reset: re-push the child's flag 8, then re-enter
+    // the modal screen, before the hub repaints.
+    const editorDone = after.indexOf("\x1b[?1049l\x1b[=0;1u", editorRan);
+    const rebuilt = after.indexOf("\x1b[>8u\x1b[?1049h\x1b[>8u", editorDone);
+    expect(rebuilt).toBeGreaterThan(editorDone);
+    expect(rebuilt).toBeLessThan(after.indexOf("ccc-morph notes", editorDone));
+    session.child.terminal!.write("q");
+  } finally {
+    session.dispose();
+  }
+});
+
+test("a vim-like editor over an alternate-screen child returns the terminal to that screen", async () => {
+  const session = startModalScreenSession(
+    "editor-alt-modes",
+    MODAL_NOTES_CONFIG,
+    "process.stdin.setRawMode(true); process.stdin.on('data', () => {}); process.stdout.write('\\x1b[?1049h\\x1b[>8u'); console.log('READY')",
+    (directory) => ({ EDITOR: writeVimLikeEditor(directory, "alt note"), VISUAL: "" }),
+  );
+  try {
+    await session.waitFor("READY");
+    await Bun.sleep(60); // the child's alternate screen and its flag 8 are observed
+    session.child.terminal!.write(Uint8Array.of(16)); // Ctrl-P: open the notes hub
+    await session.waitFor("ccc-morph notes [active]");
+    const opened = session.output().length;
+    session.child.terminal!.write("a");
+    await session.waitFor("alt note", opened);
+    const after = session.output().slice(opened);
+    const editorRan = after.indexOf("EDITOR");
+    // Before the editor: pop the child's alt-screen flag and leave its alternate screen.
+    const handOff = after.indexOf("\x1b[<u\x1b[?1049l");
+    expect(handOff).toBeGreaterThanOrEqual(0);
+    expect(handOff).toBeLessThan(editorRan);
+    // After the editor left its own alternate screen (dropping the terminal to main): re-enter
+    // the child's alternate screen and re-push its flag, before the hub repaints there.
+    const editorDone = after.indexOf("\x1b[?1049l\x1b[=0;1u", editorRan);
+    const rebuilt = after.indexOf("\x1b[?1049h\x1b[>8u", editorDone);
+    expect(rebuilt).toBeGreaterThan(editorDone);
+    expect(rebuilt).toBeLessThan(after.indexOf("ccc-morph notes", editorDone));
+    session.child.terminal!.write("q");
+  } finally {
+    session.dispose();
+  }
+});
+
+test("the note editor is declined while a child owns a lingering mode, keeping its state intact", async () => {
+  // An enhanced main-screen keyboard stack (flag 8) AND a lingering 1049. The child echoes its
+  // input as DATA:<hex>, so its keyboard state can be checked after the attempt.
+  const session = startModalScreenSession(
+    "editor-lingering-1049",
+    `${MODAL_NOTES_CONFIG}[[bindings]]
+keys = ["ctrl-g"]
+action = { type = "send", keys = ["ctrl-d"] }
+`,
+    "process.stdin.setRawMode(true); process.stdin.on('data', (d) => console.log('DATA:' + d.toString('hex'))); process.stdout.write('\\x1b[>8u\\x1b[?1049;47h\\x1b[?47l'); console.log('READY')",
+    (directory) => ({ EDITOR: writeVimLikeEditor(directory, "lingering note"), VISUAL: "" }),
+  );
+  try {
+    await session.waitFor("READY");
+    await Bun.sleep(60); // the flag and the lingering 1049 are observed
+    session.child.terminal!.write(Uint8Array.of(16)); // Ctrl-P: open the notes hub
+    await session.waitFor("ccc-morph notes [active]");
+    const opened = session.output().length;
+    session.child.terminal!.write("a"); // ask for the external editor
+    await session.waitFor("note editor unavailable", opened); // declined, with a status
+    const attempt = session.output().slice(opened);
+    // The editor never ran (its output never appeared, no note was saved), and nothing --
+    // neither ccc-morph nor an editor -- sent the terminal any screen or keyboard-mode control.
+    expect(attempt).not.toContain("EDITOR");
+    expect(attempt).not.toContain("lingering note");
+    for (const control of ["\x1b[?1049", "\x1b[?1047", "\x1b[?47", "\x1b[=", "\x1b[<u", "\x1b[>"]) {
+      expect(attempt).not.toContain(control);
+    }
+    session.child.terminal!.write("q"); // close the hub
+    await Bun.sleep(150);
+    // The child's keyboard state is unchanged: a send action is still encoded for flag 8, as the
+    // CSI-u Ctrl-D the child receives (legacy would be the 04 byte).
+    session.child.terminal!.write(Uint8Array.of(7)); // Ctrl-G: send Ctrl-D
+    await session.waitFor(`DATA:${Buffer.from("\x1b[100;5u").toString("hex")}`, opened);
+  } finally {
+    session.dispose();
   }
 });
